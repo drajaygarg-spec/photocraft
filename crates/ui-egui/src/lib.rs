@@ -1684,8 +1684,9 @@ impl PhotocraftApp {
                     st.saved_revision = revision;
                     app.remember_stamp(doc, path);
                 }
-                // A screenshot library document keeps its PNG in step with the editable file.
-                if hooks && arm {
+                // A screenshot library document keeps its PNG in step with the editable file, for
+                // automation saves too: it is part of the library, not a user-configured hook.
+                if arm {
                     crate::screenshot::after_save(app, path);
                 }
                 // "Save Document" script events and File › Generate › Image Assets.

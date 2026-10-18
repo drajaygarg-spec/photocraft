@@ -489,6 +489,16 @@ mod tests {
         crate::arrow_ui::create(&mut app, &g);
         app.save_in_place(pcraft.to_string_lossy().into_owned()).unwrap();
         assert_ne!(std::fs::read(&png).unwrap(), before, "the PNG follows the save");
+        // An automation save (control channel, MCP) refreshes the PNG as well.
+        let before_auto = std::fs::read(&png).unwrap();
+        let g = crate::arrow_ui::geometry([5.0, 35.0], [60.0, 5.0], egui::Modifiers::NONE).unwrap();
+        crate::arrow_ui::create(&mut app, &g);
+        let st = app.session.active().unwrap();
+        let (doc, revision) = (st.doc.id, st.revision);
+        let bytes = photocraft_io::export(&st.doc, &pcraft.to_string_lossy(), &Default::default()).unwrap().bytes;
+        std::fs::write(&pcraft, bytes).unwrap();
+        app.saved_automation(doc, revision, &pcraft.to_string_lossy(), &[], false);
+        assert_ne!(std::fs::read(&png).unwrap(), before_auto, "an automation save refreshes the PNG too");
         let reopened = photocraft_format::read_file(&pcraft).unwrap();
         let doc = photocraft_io::import(&pcraft.to_string_lossy(), &reopened).unwrap().document;
         assert!(doc.layers.iter().any(|l| l.name.starts_with("Arrow")), "the arrow is still a layer");
