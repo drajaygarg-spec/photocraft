@@ -409,13 +409,14 @@ fn from_collage(s: &mut Session, p: &Value) -> Result<Value> {
         }
     };
     let (want_rows, want_cols) = (count("rows")?, count("columns")?);
-    let (rows, cols) = match (want_rows, want_cols) {
-        (Some(r), Some(c)) => (r, c),
-        (r, c) => {
-            let g = detect_grid(&doc);
-            (r.unwrap_or(g.rows), c.unwrap_or(g.columns))
-        }
+    // The detected grid, unless both counts were given. Its edges are where the panels really
+    // meet (they can be a pixel or two off an equal split), as Cut Out snaps to them.
+    let grid = match (want_rows, want_cols) {
+        (Some(_), Some(_)) => None,
+        _ => Some(detect_grid(&doc)),
     };
+    let rows = want_rows.or(grid.as_ref().map(|g| g.rows)).unwrap_or(1);
+    let cols = want_cols.or(grid.as_ref().map(|g| g.columns)).unwrap_or(1);
     let stem = doc.name.rsplit_once('.').map_or(doc.name.as_str(), |(a, _)| a).to_string();
     // Columns of the new figure follow the collage's grid unless the dialog says otherwise.
     let mut q = p.clone();
@@ -424,11 +425,22 @@ fn from_collage(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let o = opts(COLLAGE, &q, cols, "ABC", &format!("{stem} figure"))?;
     let (w, h) = (doc.size.width, doc.size.height);
+    // Detected edges on an axis whose count is the detected one; an equal split otherwise.
+    let edges = |n: usize, extent: u32, detected: Option<&Vec<u32>>| -> Vec<u32> {
+        match detected.filter(|e| e.len() == n + 1) {
+            Some(e) => e.clone(),
+            None => (0..=n).map(|i| (i * extent as usize / n) as u32).collect(),
+        }
+    };
+    let xs = edges(cols, w, grid.as_ref().map(|g| &g.xs));
+    let ys = edges(rows, h, grid.as_ref().map(|g| &g.ys));
     let mut sources = Vec::with_capacity(rows * cols);
     for r in 0..rows {
         for c in 0..cols {
-            let (x0, x1) = ((c * w as usize / cols) as u32, ((c + 1) * w as usize / cols) as u32);
-            let (y0, y1) = ((r * h as usize / rows) as u32, ((r + 1) * h as usize / rows) as u32);
+            let (Some(&x0), Some(&x1), Some(&y0), Some(&y1)) = (xs.get(c), xs.get(c + 1), ys.get(r), ys.get(r + 1)) else { continue };
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
             let mut t = Session::new();
             t.add_document(doc.clone(), None);
             t.execute("image.crop", json!({"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}))?;

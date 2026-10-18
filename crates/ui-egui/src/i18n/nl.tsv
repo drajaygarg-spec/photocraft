@@ -4027,7 +4027,7 @@ curves	Smooth	Vloeiend maken
 	Open for editing	Openen om te bewerken
 	Screenshots are available on macOS for now	Schermafbeeldingen zijn voorlopig alleen beschikbaar op macOS
 	A screenshot is already being taken	Er wordt al een schermafbeelding gemaakt
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	Schermopname mislukt. Sta PhotoCraft Dev toe in Systeeminstellingen › Privacy en beveiliging › Schermopname
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	Schermopname mislukt. Sta {app} toe in Systeeminstellingen › Privacy en beveiliging › Schermopname
 	Screenshot {name} saved to the library	Schermafbeelding {name} opgeslagen in de bibliotheek
 	Saved, but the library PNG could not be updated: {error}	Opgeslagen, maar de PNG in de bibliotheek kon niet worden bijgewerkt: {error}
 	Could not open the screenshot	Kan de schermafbeelding niet openen

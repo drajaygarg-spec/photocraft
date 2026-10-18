@@ -143,3 +143,17 @@ fn bad_params_are_errors_and_leave_the_document_alone() {
     let mut empty = Session::new();
     assert!(empty.execute("image.cutOut", json!({"from": 1, "to": 2})).is_err());
 }
+
+#[test]
+fn two_cuts_are_two_undo_steps_even_with_a_full_history() {
+    let mut s = session(200, 40, 8);
+    s.edit_prefs(|p| p.performance.history_states = 2);
+    for _ in 0..3 {
+        s.execute("layer.new.layer", json!({})).unwrap();
+    }
+    s.execute("image.cutOut", json!({"from": 10, "to": 20})).unwrap();
+    s.execute("image.cutOut", json!({"from": 10, "to": 20})).unwrap();
+    assert_eq!(doc(&s).size.width, 180);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(doc(&s).size.width, 190, "one undo takes back one cut");
+}

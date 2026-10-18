@@ -3754,7 +3754,7 @@ curves	Smooth	Làm mượt
 	Open for editing	Mở để chỉnh sửa
 	Screenshots are available on macOS for now	Hiện chỉ chụp màn hình được trên macOS
 	A screenshot is already being taken	Đang chụp màn hình
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	Chụp màn hình thất bại. Cho phép PhotoCraft Dev trong Cài đặt hệ thống › Quyền riêng tư & Bảo mật › Ghi màn hình
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	Chụp màn hình thất bại. Cho phép {app} trong Cài đặt hệ thống › Quyền riêng tư & Bảo mật › Ghi màn hình
 	Screenshot {name} saved to the library	Đã lưu ảnh chụp {name} vào thư viện
 	Saved, but the library PNG could not be updated: {error}	Đã lưu nhưng không cập nhật được PNG trong thư viện: {error}
 	Could not open the screenshot	Không mở được ảnh chụp

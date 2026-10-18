@@ -3262,7 +3262,7 @@ curves	Smooth	Haluskan
 	Open for editing	Buka untuk diedit
 	Screenshots are available on macOS for now	Tangkapan layar untuk saat ini tersedia di macOS
 	A screenshot is already being taken	Tangkapan layar sedang diambil
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	Tangkapan layar gagal. Izinkan PhotoCraft Dev di Pengaturan Sistem › Privasi & Keamanan › Rekaman Layar
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	Tangkapan layar gagal. Izinkan {app} di Pengaturan Sistem › Privasi & Keamanan › Rekaman Layar
 	Screenshot {name} saved to the library	Tangkapan layar {name} disimpan ke pustaka
 	Saved, but the library PNG could not be updated: {error}	Tersimpan, tetapi PNG pustaka tidak dapat diperbarui: {error}
 	Could not open the screenshot	Tangkapan layar tidak dapat dibuka

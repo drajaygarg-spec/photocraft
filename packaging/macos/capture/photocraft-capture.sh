@@ -9,14 +9,28 @@ set -u
 
 # The app to open captures in (the first one installed).
 for candidate in "PhotoCraft Dev" "PhotoCraft"; do
-  if [ -d "/Applications/$candidate.app" ] || [ -d "$HOME/Applications/$candidate.app" ]; then
-    APP="$candidate"
-    break
-  fi
+  for root in /Applications "$HOME/Applications"; do
+    if [ -d "$root/$candidate.app" ]; then
+      APP="$candidate"
+      APP_PATH="$root/$candidate.app"
+      break 2
+    fi
+  done
 done
 
+# PhotoCraft's settings folder, by the app's own rules (apps/photocraft/src/app_dirs.rs):
+# PHOTOCRAFT_CONFIG_DIR when set; else portable mode, a marker file beside the app's executable
+# putting everything in <exe dir>/PhotoCraftData; else ~/Library/Application Support/Photocraft.
+EXE_DIR="${APP_PATH:-}/Contents/MacOS"
+if [ -n "${PHOTOCRAFT_CONFIG_DIR:-}" ]; then
+  CONFIG="$PHOTOCRAFT_CONFIG_DIR"
+elif [ -n "${APP_PATH:-}" ] && { [ -e "$EXE_DIR/portable.txt" ] || [ -e "$EXE_DIR/PhotoCraft.portable" ]; } && [ -d "$EXE_DIR/PhotoCraftData" ]; then
+  CONFIG="$EXE_DIR/PhotoCraftData"
+else
+  CONFIG="$HOME/Library/Application Support/Photocraft"
+fi
 # The library folder PhotoCraft uses (preferences.json › dialogs › screenshot.library › folder).
-PREFS="$HOME/Library/Application Support/Photocraft/preferences.json"
+PREFS="$CONFIG/preferences.json"
 DIR=""
 if [ -f "$PREFS" ]; then
   DIR=$(/usr/bin/osascript -l JavaScript -e '

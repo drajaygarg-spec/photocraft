@@ -233,7 +233,9 @@ fn cut_out(s: &mut Session, p: &Value) -> Result<Value> {
     // Share one history step between the rasterizing, the cut and the seam.
     let key = match p.get("coalesce").and_then(Value::as_str) {
         Some(k) => k.to_string(),
-        None => format!("cut-out-{}", s.active().map_or(0, |d| d.history.past_len())),
+        // The document revision, unlike the history length (capped by History States), moves
+        // with every edit: two cuts in a row never share a step.
+        None => format!("cut-out-{}", s.active().map_or(0, |d| d.revision)),
     };
     let mut rasterized = Vec::new();
     for id in ids {

@@ -161,8 +161,10 @@ fn rows_and_columns_can_be_given_and_are_remembered() {
     let saved = s.prefs().dialogs.get(COLLAGE).cloned().unwrap();
     assert_eq!(saved["labels"], "(a)");
     assert_eq!(saved["dpi"], 600);
+    let open = s.documents().len();
     assert!(s.execute(COLLAGE, json!({"rows": 40})).is_err());
     assert!(s.execute(COLLAGE, json!({"labels": "xyz"})).is_err());
+    assert_eq!(s.documents().len(), open, "a rejected collage opens no document");
 }
 
 #[test]
@@ -178,4 +180,36 @@ fn edge_detection_needs_an_edge_at_every_boundary() {
     scores[202] = 1.0;
     assert_eq!(detect_parts(&scores).1, vec![0, 100, 202, 300, 400]);
     assert_eq!(detect_parts(&vec![0.01; 400]), (1, vec![0, 400]), "no edges: one part");
+}
+
+#[test]
+fn uneven_panels_split_on_their_real_edges() {
+    // Panels 101, 101 and 98 px wide (captures are a pixel or two uneven): an equal split at 100
+    // and 200 would cut a sliver of the neighbouring panel into the first two.
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 300, "height": 100, "background": "black", "name": "uneven.tif"})).unwrap();
+    s.edit("cells", |doc, _| {
+        let bg = doc.background_mut().ok_or(EngineError::Other("no background".into()))?;
+        if let LayerContent::Raster(surf) = &mut bg.content {
+            let fmt = surf.format();
+            for (x0, x1, g) in [(0, 101, 0.2f32), (101, 202, 0.8), (202, 300, 0.5)] {
+                surf.fill_rect(Rect::new(x0, 0, x1, 100), &photocraft_raster::from_rgba(&fmt, [g, g, g, 1.0]));
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let g = s.execute("figure.detectGrid", json!({})).unwrap();
+    assert_eq!(g["x"], json!([0, 101, 202, 300]), "{g}");
+    let r = s.execute(COLLAGE, json!({"rows": 1, "width": "custom", "widthMm": 100, "dpi": 72, "gutterMm": 0, "labels": "none"})).unwrap();
+    assert_eq!(r["columns"].as_u64(), Some(3), "{r}");
+    // Each panel is one flat grey: no sliver of a neighbour was cut in.
+    let doc = &s.active().unwrap().doc;
+    for p in r["panels"].as_array().unwrap() {
+        let id = photocraft_doc::LayerId(p["layer"].as_u64().unwrap());
+        let [x, y, w, h]: [i32; 4] = serde_json::from_value(p["rect"].clone()).unwrap();
+        let LayerContent::Raster(surf) = &doc.layer(id).unwrap().content else { panic!("pixels") };
+        let (a, b) = (surf.pixel(x, y + h / 2)[0], surf.pixel(x + w - 1, y + h / 2)[0]);
+        assert!((a - b).abs() < 0.02, "panel {p}: {a} vs {b}");
+    }
 }

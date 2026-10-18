@@ -116,6 +116,10 @@ impl PhotocraftApp {
     /// Read and open the file at `path` (see [`open_file`](Self::open_file)).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: &str) -> Result<Vec<String>, String> {
+        // A screenshot library PNG opens as its editable copy, however it arrives (Finder, Open
+        // Recent, a drop, File › Open with a path): `screenshot::editable`.
+        let editable = crate::screenshot::editable(self, path);
+        let path = editable.as_str();
         if self.show_if_open(path) {
             return Ok(Vec::new());
         }
@@ -140,8 +144,7 @@ impl PhotocraftApp {
     /// open in name order ([`natural_cmp`]: `File_2` before `File_10`), and their tabs keep that
     /// order however long each takes to open in the background (#3248). Returns how many opened.
     pub fn open_paths(&mut self, paths: &[String]) -> usize {
-        // A screenshot library PNG opens as its editable copy (`screenshot::editable`).
-        let mut paths: Vec<String> = paths.iter().map(|p| crate::screenshot::editable(self, &absolute(p))).collect();
+        let mut paths: Vec<String> = paths.iter().map(|p| absolute(p)).collect();
         paths.sort_by(|a, b| natural_cmp(a, b));
         let batch = crate::jobs_ui::begin_batch(self);
         let mut opened = 0;

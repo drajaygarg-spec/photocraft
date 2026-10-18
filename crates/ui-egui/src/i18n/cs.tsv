@@ -3875,7 +3875,7 @@ navigator	Zoom	Zvětšení
 	Open for editing	Otevřít k úpravám
 	Screenshots are available on macOS for now	Snímky obrazovky jsou zatím dostupné jen v macOS
 	A screenshot is already being taken	Snímek obrazovky se již pořizuje
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	Snímání obrazovky selhalo. Povolte PhotoCraft Dev v Nastavení systému › Soukromí a zabezpečení › Nahrávání obrazovky
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	Snímání obrazovky selhalo. Povolte {app} v Nastavení systému › Soukromí a zabezpečení › Nahrávání obrazovky
 	Screenshot {name} saved to the library	Snímek {name} uložen do knihovny
 	Saved, but the library PNG could not be updated: {error}	Uloženo, ale PNG v knihovně se nepodařilo aktualizovat: {error}
 	Could not open the screenshot	Snímek nelze otevřít

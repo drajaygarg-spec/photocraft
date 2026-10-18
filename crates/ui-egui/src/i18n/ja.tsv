@@ -3944,7 +3944,7 @@ curves	Smooth	スムーズ
 	Open for editing	編集用に開く
 	Screenshots are available on macOS for now	スクリーンショットは現在 macOS でのみ使えます
 	A screenshot is already being taken	スクリーンショットを撮影中です
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	画面の取り込みに失敗しました。システム設定 › プライバシーとセキュリティ › 画面収録で PhotoCraft Dev を許可してください
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	画面の取り込みに失敗しました。システム設定 › プライバシーとセキュリティ › 画面収録で {app} を許可してください
 	Screenshot {name} saved to the library	スクリーンショット {name} をライブラリに保存しました
 	Saved, but the library PNG could not be updated: {error}	保存しましたが、ライブラリの PNG を更新できませんでした: {error}
 	Could not open the screenshot	スクリーンショットを開けませんでした

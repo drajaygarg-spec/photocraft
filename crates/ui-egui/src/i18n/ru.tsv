@@ -3240,7 +3240,7 @@ curves	Smooth	Сгладить
 	Open for editing	Открыть для правки
 	Screenshots are available on macOS for now	Снимки экрана пока доступны только в macOS
 	A screenshot is already being taken	Снимок экрана уже делается
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	Не удалось снять экран. Разрешите PhotoCraft Dev в Системных настройках › Конфиденциальность и безопасность › Запись экрана
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	Не удалось снять экран. Разрешите {app} в Системных настройках › Конфиденциальность и безопасность › Запись экрана
 	Screenshot {name} saved to the library	Снимок {name} сохранён в библиотеку
 	Saved, but the library PNG could not be updated: {error}	Сохранено, но PNG в библиотеке не обновлён: {error}
 	Could not open the screenshot	Не удалось открыть снимок

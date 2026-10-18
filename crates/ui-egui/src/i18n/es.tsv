@@ -4229,7 +4229,7 @@ navigator	Zoom	Zoom
 	Open for editing	Abrir para editar
 	Screenshots are available on macOS for now	Las capturas están disponibles en macOS por ahora
 	A screenshot is already being taken	Ya se está tomando una captura
-	The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording	La captura falló. Permita PhotoCraft Dev en Ajustes del Sistema › Privacidad y seguridad › Grabación de pantalla
+	The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording	La captura falló. Permita {app} en Ajustes del Sistema › Privacidad y seguridad › Grabación de pantalla
 	Screenshot {name} saved to the library	Captura {name} guardada en la biblioteca
 	Saved, but the library PNG could not be updated: {error}	Guardado, pero no se pudo actualizar el PNG de la biblioteca: {error}
 	Could not open the screenshot	No se pudo abrir la captura

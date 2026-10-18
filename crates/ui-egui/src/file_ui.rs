@@ -128,7 +128,8 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                 .active()
                 .and_then(|st| st.path.as_deref())
                 .and_then(|p| std::path::Path::new(p).parent())
-                .map_or(dir.clone(), |d| d.to_string_lossy().into_owned());
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|| droplet_default_dir(app));
             let r = form(
                 app,
                 id,
@@ -160,18 +161,15 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
         }
         "file.export.publication" => {
             let st = app.session.active()?;
-            let folder = st.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map_or(dir, |d| d.to_string_lossy().into_owned());
-            let r = form(
-                app,
-                id,
-                tl!("Export for Publication"),
-                with_remembered(
-                    app,
-                    id,
-                    json!({"tiff": true, "png": true, "dpi": 300, "width": "keep", "widthMm": 85.0, "folder": folder, "name": format!("{stem}_300dpi")}),
-                ),
-                json!({"width": ["keep", "single", "oneAndHalf", "double", "custom"]}),
-            );
+            // Beside the document, else Documents: never "." (the app's working directory, `/`
+            // when launched from the Finder).
+            let folder = st.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map(|d| d.to_string_lossy().into_owned());
+            let folder = folder.unwrap_or_else(|| droplet_default_dir(app));
+            let mut fields = with_remembered(app, id, json!({"tiff": true, "png": true, "dpi": 300, "width": "keep", "widthMm": 85.0, "folder": folder}));
+            // The name states the resolution the dialog opens with (a remembered 600 included).
+            let dpi = fields["dpi"].as_f64().unwrap_or(300.0).round();
+            fields["name"] = json!(format!("{stem}_{dpi}dpi"));
+            let r = form(app, id, tl!("Export for Publication"), fields, json!({"width": ["keep", "single", "oneAndHalf", "double", "custom"]}));
             if let Some(f) = r.get("dialog").and_then(Value::as_u64).and_then(|d| app.ui.dialogs.iter_mut().find(|x| x.id == d)) {
                 f.fields.insert(
                     "__labels".into(),
@@ -1817,6 +1815,16 @@ mod publication_dialog_tests {
         let f = &app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields;
         assert_eq!((f["labels"].as_str(), f["gutterColor"].as_str(), f["columns"].as_i64()), (Some("(a)"), Some("#000000"), Some(5)));
         assert!(f.contains_key("__labels"));
+        // Export for Publication: a remembered 600 dpi names the file for 600 dpi, and an unsaved
+        // document's folder is a real one, not ".".
+        app.session.edit_prefs(|p| {
+            p.dialogs.insert("file.export.publication".into(), json!({"dpi": 600}));
+        });
+        let r = invoke(&mut app, &ctx, "file.export.publication", &json!({})).unwrap().unwrap();
+        let id = r["dialog"].as_u64().unwrap();
+        let f = &app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields;
+        assert!(f["name"].as_str().is_some_and(|n| n.ends_with("_600dpi")), "{}", f["name"]);
+        assert_ne!(f["folder"].as_str(), Some("."));
         for menu in ["figure.make", "file.export.publication"] {
             assert!(invoke(&mut app, &ctx, menu, &json!({})).is_some_and(|r| r.is_ok()), "{menu} opens a dialog");
         }

@@ -93,9 +93,23 @@ fn capture(png: &Path) -> Result<bool, String> {
         .status()
         .map_err(|e| format!("Could not start the screen capture: {e}"))?;
     if !status.success() {
-        return Err(tl!("The screen capture failed. Allow PhotoCraft Dev in System Settings › Privacy & Security › Screen Recording").into());
+        let app = running_app_name();
+        return Err(crate::i18n::fmt(
+            tl!("The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording"),
+            &[("app", app.as_str())],
+        ));
     }
     Ok(png.exists())
+}
+
+/// The name of the app bundle this runs from (the one macOS asks permission for), e.g.
+/// "PhotoCraft" or "PhotoCraft Dev"; "PhotoCraft" when not run from a bundle.
+#[cfg(target_os = "macos")]
+fn running_app_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.ancestors().find_map(|a| a.file_name()?.to_str()?.strip_suffix(".app").map(str::to_string)))
+        .unwrap_or_else(|| "PhotoCraft".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -252,7 +266,7 @@ fn request_id() -> egui::Id {
 
 pub fn body(app: &PhotocraftApp, ui: &mut egui::Ui) {
     let dir = library_dir(app);
-    let list = entries(&dir);
+    let list = cached_entries(ui.ctx(), &dir);
     let request = |ui: &egui::Ui, r: Request| ui.ctx().data_mut(|d| d.insert_temp(request_id(), r));
     ui.horizontal(|ui| {
         if crate::widgets::primary_button(ui, tl!("New Screenshot"), 150.0).clicked() {
@@ -300,6 +314,20 @@ pub fn body(app: &PhotocraftApp, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+/// [`entries`] for the library window, read again only when the folder changes (a file added,
+/// removed or renamed moves its modification time), not on every frame. Thumbnails are decoded
+/// once per file version ([`thumbnail`]).
+fn cached_entries(ctx: &egui::Context, dir: &Path) -> Vec<(String, PathBuf, PathBuf)> {
+    let modified = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
+    let key = egui::Id::new(("screenshot-entries", dir.to_path_buf(), modified));
+    if let Some(list) = ctx.data(|d| d.get_temp::<Vec<(String, PathBuf, PathBuf)>>(key)) {
+        return list;
+    }
+    let list = entries(dir);
+    ctx.data_mut(|d| d.insert_temp(key, list.clone()));
+    list
 }
 
 /// A thumbnail of `png`, decoded once per file version and kept for the session.
@@ -456,6 +484,11 @@ mod tests {
         assert_eq!(app.open_paths(&[other.to_string_lossy().into_owned()]), 1);
         assert!(other.with_extension("pcraft").exists());
         assert_eq!(app.session.active().and_then(|st| st.path.clone()), Some(other.with_extension("pcraft").to_string_lossy().into_owned()));
+        // So does a single open (Open Recent, a drop, File › Open with a path).
+        let recent = d.join("Screenshot 2026-10-15 at 19.06.00.png");
+        std::fs::copy(&png, &recent).unwrap();
+        app.open_path(&recent.to_string_lossy()).unwrap();
+        assert_eq!(app.session.active().and_then(|st| st.path.clone()), Some(recent.with_extension("pcraft").to_string_lossy().into_owned()));
         ctx.data_mut(|data| data.insert_temp(request_id(), Request::Open(system.clone())));
         handle_request(&mut app, &ctx);
         assert!(system.with_extension("pcraft").exists(), "editable copy made");

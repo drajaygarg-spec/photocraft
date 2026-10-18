@@ -13,6 +13,17 @@ type P = (f64, f64);
 /// visible shaft and its heads shrink instead of overlapping.
 const MAX_HEAD_SHARE: f64 = 0.9;
 
+/// Head width and length limits in stroke widths, as `Arrowhead::validate` accepts them: a file can
+/// hold any number, and the renderer bounds its own work.
+const MIN_SIZE: f64 = 0.5;
+const MAX_SIZE: f64 = 50.0;
+
+/// A head size from a file, within the limits (a non-finite one is the smallest).
+fn size(v: f32) -> f64 {
+    let v = f64::from(v);
+    if v.is_finite() { v.clamp(MIN_SIZE, MAX_SIZE) } else { MIN_SIZE }
+}
+
 /// Shortens the open polylines of `lines` for their heads and returns the head outlines
 /// (positively oriented, for the non-zero rule). `width` is the stroke width in px.
 pub fn arrowheads(lines: &mut [Polyline], start: Option<&Arrowhead>, end: Option<&Arrowhead>, width: f64) -> Vec<Vec<P>> {
@@ -28,7 +39,7 @@ pub fn arrowheads(lines: &mut [Polyline], start: Option<&Arrowhead>, end: Option
         if total <= 1e-9 {
             continue;
         }
-        let wanted = |h: Option<&Arrowhead>| h.map_or(0.0, |h| f64::from(h.length) * width);
+        let wanted = |h: Option<&Arrowhead>| h.map_or(0.0, |h| size(h.length) * width);
         let (ls, le) = (wanted(start), wanted(end));
         let k = if ls + le > total * MAX_HEAD_SHARE { total * MAX_HEAD_SHARE / (ls + le) } else { 1.0 };
         let mut cut_start = 0.0;
@@ -62,8 +73,8 @@ fn head(pts: &[P], h: &Arrowhead, len: f64, width: f64) -> (Option<Vec<P>>, f64)
         return (None, 0.0);
     }
     let n = (-d.1, d.0);
-    let half = f64::from(h.width) * width * 0.5;
-    let c = f64::from(h.concavity).clamp(-0.5, 0.5);
+    let half = size(h.width) * width * 0.5;
+    let c = if h.concavity.is_finite() { f64::from(h.concavity).clamp(-0.5, 0.5) } else { 0.0 };
     let base = sub(tip, mul(d, len));
     let notch = sub(tip, mul(d, len * (1.0 - c)));
     let poly = vec![tip, add(base, mul(n, half)), notch, sub(base, mul(n, half))];
@@ -208,6 +219,17 @@ mod tests {
         ];
         assert!(arrowheads(&mut lines, Some(&Arrowhead::default()), Some(&Arrowhead::default()), 2.0).is_empty());
         assert!(arrowheads(&mut lines, None, Some(&Arrowhead::default()), f64::NAN).is_empty());
+    }
+
+    #[test]
+    fn heads_from_files_are_bounded() {
+        // A file can hold any number: heads stay within the sizes Arrowhead::validate accepts.
+        for h in [Arrowhead { width: 1e30, length: 1e30, concavity: f32::NAN }, Arrowhead { width: f32::NAN, length: f32::INFINITY, concavity: 9.0 }] {
+            let mut lines = vec![line(&[(0.0, 0.0), (1000.0, 0.0)])];
+            let heads = arrowheads(&mut lines, None, Some(&h), 2.0);
+            assert_eq!(heads.len(), 1);
+            assert!(heads[0].iter().all(|p| p.0.is_finite() && p.1.is_finite() && p.1.abs() <= 50.0 + 1e-9), "{:?}", heads[0]);
+        }
     }
 
     #[test]

@@ -268,6 +268,12 @@ fn target(app: &PhotocraftApp) -> Option<(u64, Geom, ArrowOptions)> {
     Some((id.0, Geom::of(sh)?, ArrowOptions::of(sh.stroke.as_ref()?, outline)?))
 }
 
+/// Where `layer`'s outline (its Stroke effect) is in its layer style.
+fn outline_index(app: &PhotocraftApp, layer: u64) -> Option<usize> {
+    let l = app.session.active()?.doc.layer(photocraft_doc::LayerId(layer))?;
+    l.effects.items.iter().position(|e| matches!(e, photocraft_doc::Effect::Stroke(_)))
+}
+
 fn handles(g: &Geom) -> [(Handle, [f64; 2]); 3] {
     [(Handle::Tail, g.p0), (Handle::Bend, g.mid()), (Handle::Tip, g.p1)]
 }
@@ -515,9 +521,16 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
             }
             // The outline follows the colour and width; Curved only shapes new arrows.
             if r.is_ok() && (next.outline != current.outline || next.outline && restyled) {
-                let mut q = if next.outline { next.outline_params(layer) } else { json!({"layer": layer}) };
-                q["coalesce"] = json!(key);
-                r = app.run(if next.outline { "layer.layerStyle.stroke" } else { "layer.layerStyle.clear" }, q);
+                let q = if next.outline {
+                    Some(("layer.layerStyle.stroke", next.outline_params(layer)))
+                } else {
+                    // Only the outline (the Stroke effect): the arrow's other effects stay.
+                    outline_index(app, layer).map(|i| ("layer.layerStyle.clear", json!({"layer": layer, "effect": i})))
+                };
+                if let Some((cmd, mut q)) = q {
+                    q["coalesce"] = json!(key);
+                    r = app.run(cmd, q);
+                }
             }
             if let Err(e) = r {
                 app.ui.status = e;
@@ -627,6 +640,25 @@ mod tests {
         create(&mut app, &Geom::straight([100.0, 300.0], [500.0, 300.0]));
         let (_, g, _) = target(&app).unwrap();
         assert!((g.mid()[1] - 220.0).abs() < 1e-6, "bent 80 px up: {:?}", g.mid());
+    }
+
+    #[test]
+    fn turning_the_outline_off_keeps_other_effects() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
+        app.run("file.new", json!({"width": 400, "height": 200, "background": "white"})).unwrap();
+        app.ui.tool = Tool::Arrow;
+        app.ui.tool_options.arrow = QUICK_STYLES[5].options(SCREEN_PX_PER_PT);
+        create(&mut app, &Geom::straight([20.0, 100.0], [300.0, 100.0]));
+        let (layer, ..) = target(&app).unwrap();
+        app.run("layer.layerStyle.dropShadow", json!({"layer": layer, "add": true})).unwrap();
+        let effects = |app: &PhotocraftApp| app.session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().effects.items.len();
+        assert_eq!(effects(&app), 2);
+        assert!(target(&app).unwrap().2.outline);
+        // What the options bar sends when Outline is unticked.
+        let i = outline_index(&app, layer).unwrap();
+        app.run("layer.layerStyle.clear", json!({"layer": layer, "effect": i})).unwrap();
+        assert_eq!(effects(&app), 1, "the drop shadow stays");
+        assert!(outline_index(&app, layer).is_none());
     }
 
     #[test]
