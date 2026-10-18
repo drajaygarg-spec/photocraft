@@ -128,6 +128,8 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                 .active()
                 .and_then(|st| st.path.as_deref())
                 .and_then(|p| std::path::Path::new(p).parent())
+                // A relative path has an empty parent: treat it as no folder.
+                .filter(|d| !d.as_os_str().is_empty())
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_else(|| droplet_default_dir(app));
             let r = form(
@@ -163,7 +165,12 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
             let st = app.session.active()?;
             // Beside the document, else Documents: never "." (the app's working directory, `/`
             // when launched from the Finder).
-            let folder = st.path.as_deref().and_then(|p| std::path::Path::new(p).parent()).map(|d| d.to_string_lossy().into_owned());
+            let folder = st
+                .path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).parent())
+                .filter(|d| !d.as_os_str().is_empty())
+                .map(|d| d.to_string_lossy().into_owned());
             let folder = folder.unwrap_or_else(|| droplet_default_dir(app));
             let mut fields = with_remembered(app, id, json!({"tiff": true, "png": true, "dpi": 300, "width": "keep", "widthMm": 85.0, "folder": folder}));
             // The name states the resolution the dialog opens with (a remembered 600 included).
@@ -1825,6 +1832,18 @@ mod publication_dialog_tests {
         let f = &app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields;
         assert!(f["name"].as_str().is_some_and(|n| n.ends_with("_600dpi")), "{}", f["name"]);
         assert_ne!(f["folder"].as_str(), Some("."));
+        // A relative path (from `file.open` with a path) has an empty parent: the folder is still
+        // a real one.
+        if let Some(st) = app.session.active_mut() {
+            st.path = Some("figure.png".into());
+        }
+        for menu in ["figure.make", "file.export.publication"] {
+            let r = invoke(&mut app, &ctx, menu, &json!({})).unwrap().unwrap();
+            let id = r["dialog"].as_u64().unwrap();
+            let f = &app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields;
+            let folder = f.get("folder").or_else(|| f.get("files")).and_then(Value::as_str).unwrap_or_default();
+            assert!(!folder.is_empty() && folder != ".", "{menu}: {folder:?}");
+        }
         for menu in ["figure.make", "file.export.publication"] {
             assert!(invoke(&mut app, &ctx, menu, &json!({})).is_some_and(|r| r.is_ok()), "{menu} opens a dialog");
         }

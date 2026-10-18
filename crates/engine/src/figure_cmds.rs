@@ -417,6 +417,11 @@ fn from_collage(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let rows = want_rows.or(grid.as_ref().map(|g| g.rows)).unwrap_or(1);
     let cols = want_cols.or(grid.as_ref().map(|g| g.columns)).unwrap_or(1);
+    // Each panel needs at least one pixel: more rows or columns than the image has is an error,
+    // not a figure with panels quietly missing.
+    if rows > doc.size.height as usize || cols > doc.size.width as usize {
+        return Err(bad_in(COLLAGE, format!("{rows} × {cols} panels don't fit a {} × {} px image", doc.size.width, doc.size.height)));
+    }
     let stem = doc.name.rsplit_once('.').map_or(doc.name.as_str(), |(a, _)| a).to_string();
     // Columns of the new figure follow the collage's grid unless the dialog says otherwise.
     let mut q = p.clone();

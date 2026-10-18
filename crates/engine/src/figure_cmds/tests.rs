@@ -161,10 +161,26 @@ fn rows_and_columns_can_be_given_and_are_remembered() {
     let saved = s.prefs().dialogs.get(COLLAGE).cloned().unwrap();
     assert_eq!(saved["labels"], "(a)");
     assert_eq!(saved["dpi"], 600);
-    let open = s.documents().len();
-    assert!(s.execute(COLLAGE, json!({"rows": 40})).is_err());
-    assert!(s.execute(COLLAGE, json!({"labels": "xyz"})).is_err());
-    assert_eq!(s.documents().len(), open, "a rejected collage opens no document");
+    // A rejected collage changes nothing: no new document, the active one untouched, and the
+    // remembered choices kept.
+    let state = |s: &Session| {
+        let st = s.active().unwrap();
+        (s.documents().len(), st.doc.id, st.revision, s.prefs().dialogs.get(COLLAGE).cloned())
+    };
+    for p in [json!({"rows": 40}), json!({"labels": "xyz"}), json!({"gutterColor": "white"})] {
+        let before = state(&s);
+        assert!(s.execute(COLLAGE, p.clone()).is_err(), "{p}");
+        assert_eq!(state(&s), before, "{p}");
+    }
+}
+
+#[test]
+fn more_panels_than_pixels_is_an_error() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 300, "height": 8, "background": "black"})).unwrap();
+    let before = s.documents().len();
+    assert!(s.execute(COLLAGE, json!({"rows": 10, "columns": 3})).is_err());
+    assert_eq!(s.documents().len(), before);
 }
 
 #[test]

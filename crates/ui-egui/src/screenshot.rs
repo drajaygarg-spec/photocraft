@@ -319,14 +319,20 @@ pub fn body(app: &PhotocraftApp, ui: &mut egui::Ui) {
 /// [`entries`] for the library window, read again only when the folder changes (a file added,
 /// removed or renamed moves its modification time), not on every frame. Thumbnails are decoded
 /// once per file version ([`thumbnail`]).
+/// A library listing with the folder modification time it was read at.
+type CachedEntries = (Option<std::time::SystemTime>, Vec<(String, PathBuf, PathBuf)>);
+
 fn cached_entries(ctx: &egui::Context, dir: &Path) -> Vec<(String, PathBuf, PathBuf)> {
     let modified = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
-    let key = egui::Id::new(("screenshot-entries", dir.to_path_buf(), modified));
-    if let Some(list) = ctx.data(|d| d.get_temp::<Vec<(String, PathBuf, PathBuf)>>(key)) {
+    // One entry per folder, replaced when the folder changes, so stale lists don't pile up.
+    let key = egui::Id::new(("screenshot-entries", dir.to_path_buf()));
+    if let Some((at, list)) = ctx.data(|d| d.get_temp::<CachedEntries>(key))
+        && at == modified
+    {
         return list;
     }
     let list = entries(dir);
-    ctx.data_mut(|d| d.insert_temp(key, list.clone()));
+    ctx.data_mut(|d| d.insert_temp::<CachedEntries>(key, (modified, list.clone())));
     list
 }
 
@@ -412,6 +418,28 @@ mod tests {
         let app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         assert!(crate::menus::is_enabled(&app, "file.screenshot.library"));
         assert_eq!(crate::menus::is_enabled(&app, "file.screenshot.new"), cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn the_library_listing_is_cached_once_per_folder() {
+        let d = dir("cache");
+        let ctx = egui::Context::default();
+        assert!(cached_entries(&ctx, &d).is_empty());
+        std::fs::write(d.join("2026-10-15 18-42-07.png"), b"x").unwrap();
+        // The folder changed: the listing is read again and replaces the old one.
+        let set_time = |secs: u64| {
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            std::fs::File::open(&d).and_then(|f| f.set_modified(t)).unwrap();
+        };
+        set_time(2_000_000_000);
+        assert_eq!(cached_entries(&ctx, &d).len(), 1);
+        std::fs::write(d.join("2026-10-15 18-43-00.png"), b"x").unwrap();
+        set_time(2_000_000_100);
+        assert_eq!(cached_entries(&ctx, &d).len(), 2);
+        let key = egui::Id::new(("screenshot-entries", d.clone()));
+        let held: Option<CachedEntries> = ctx.data(|m| m.get_temp(key));
+        assert_eq!(held.map(|h| h.1.len()), Some(2), "one entry per folder, the latest listing");
+        let _ = std::fs::remove_dir_all(d);
     }
 
     #[test]
