@@ -8,6 +8,10 @@ fn stroke_validation_rejects_hostile_values_without_editing_history() {
     let id = s.execute("shape.create", json!({"rect": [20, 20, 50, 30], "stroke": {"width": 4}})).unwrap()["layer"].as_u64().unwrap();
     let before = s.active().unwrap().doc.clone();
     let history = s.active().unwrap().history.past_len();
+    // A valid width with an invalid head: nothing of it is applied.
+    assert!(s.execute("shape.edit", json!({"layer": id, "stroke": {"width": 8, "arrowEnd": 3}})).is_err());
+    assert_eq!(s.active().unwrap().doc, before);
+    assert_eq!(s.active().unwrap().history.past_len(), history);
     let invalid = [
         json!(true),
         json!([]),

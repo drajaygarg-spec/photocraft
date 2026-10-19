@@ -1688,6 +1688,8 @@ impl PhotocraftApp {
             }
         };
         self.ui.status = crate::i18n::fmt(tl!("Saved {name}"), &[("name", path)]);
+        // A screenshot library PNG that could not follow the save: shown last, as an error.
+        let mut png_error = None;
         if !copy {
             // A background save may finish while another document is active (or after its
             // document was closed, when there is nothing left to record).
@@ -1703,7 +1705,7 @@ impl PhotocraftApp {
                 // A screenshot library document keeps its PNG in step with the editable file, for
                 // automation saves too: it is part of the library, not a user-configured hook.
                 if arm {
-                    crate::screenshot::after_save(app, path);
+                    png_error = crate::screenshot::after_save(app, path);
                 }
                 // "Save Document" script events and File › Generate › Image Assets.
                 if hooks
@@ -1730,6 +1732,10 @@ impl PhotocraftApp {
         self.ui.status_error = false;
         let what = crate::i18n::fmt(tl!("Saved {name}"), &[("name", file_open::display_name(path).as_str())]);
         notices::io_warnings(self, &what, warnings);
+        if let Some(e) = png_error {
+            self.ui.status = e;
+            self.ui.status_error = true;
+        }
         self.sync_views();
     }
 

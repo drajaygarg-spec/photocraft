@@ -181,10 +181,12 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// After a save of the active document to `path`: a library `.pcraft` also rewrites its `.png`.
-pub fn after_save(app: &mut PhotocraftApp, path: &str) {
+/// Returns the message to show when the PNG could not be written (the caller shows it after its
+/// own "Saved" status, so neither hides the other).
+pub fn after_save(app: &mut PhotocraftApp, path: &str) -> Option<String> {
     let p = Path::new(path);
     if p.extension().and_then(|e| e.to_str()) != Some("pcraft") || !p.parent().is_some_and(|d| same_dir(d, &library_dir(app))) {
-        return;
+        return None;
     }
     let png = p.with_extension("png").to_string_lossy().into_owned();
     let r = (|| -> Result<(), String> {
@@ -194,10 +196,7 @@ pub fn after_save(app: &mut PhotocraftApp, path: &str) {
         let write = app.services.write.as_mut().ok_or("no writer configured")?;
         write(&png, &bytes)
     })();
-    if let Err(e) = r {
-        app.ui.status = crate::i18n::fmt(tl!("Saved, but the library PNG could not be updated: {error}"), &[("error", e.as_str())]);
-        app.ui.status_error = true;
-    }
+    r.err().map(|e| crate::i18n::fmt(tl!("Saved, but the library PNG could not be updated: {error}"), &[("error", e.as_str())]))
 }
 
 /// The library's screenshots, newest first: (stem, the file to open, the PNG for its thumbnail).
@@ -439,6 +438,32 @@ mod tests {
         let key = egui::Id::new(("screenshot-entries", d.clone()));
         let held: Option<CachedEntries> = ctx.data(|m| m.get_temp(key));
         assert_eq!(held.map(|h| h.1.len()), Some(2), "one entry per folder, the latest listing");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_png_that_cannot_follow_the_save_is_reported() {
+        let d = dir("png-error");
+        let mut app = PhotocraftApp::new(
+            photocraft_engine::Session::new(),
+            crate::Services {
+                export: Some(Box::new(|doc, path, _| {
+                    photocraft_io::export(doc, path, &Default::default()).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
+                })),
+                write: Some(Box::new(|path, bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))),
+                ..Default::default()
+            },
+        );
+        app.session.edit_prefs(|p| {
+            p.dialogs.insert(PREF.into(), json!({"folder": d.to_string_lossy()}));
+        });
+        app.run("file.new", json!({"width": 20, "height": 20, "background": "white"})).unwrap();
+        // A folder where the PNG should go: writing it fails.
+        std::fs::create_dir_all(d.join("2026-10-19 10-00-00.png")).unwrap();
+        let pcraft = d.join("2026-10-19 10-00-00.pcraft");
+        app.save_in_place(pcraft.to_string_lossy().into_owned()).unwrap();
+        assert!(app.ui.status_error, "the failed PNG is reported: {}", app.ui.status);
+        assert!(app.ui.status.contains("PNG"), "{}", app.ui.status);
         let _ = std::fs::remove_dir_all(d);
     }
 

@@ -38,6 +38,24 @@ fn droplet_default_dir(app: &PhotocraftApp) -> String {
     dir
 }
 
+/// The folder publication dialogs (Export for Publication, Make Figure) offer for an unsaved
+/// document, on every platform: the user's Documents folder, else their home folder. The
+/// working directory ("." — `/` for a Finder-launched app) is a last resort only without either.
+fn user_default_dir(app: &PhotocraftApp) -> String {
+    let dir = default_dir(app);
+    if dir != "." {
+        return dir;
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).filter(|h| !h.is_empty());
+    match home.map(std::path::PathBuf::from) {
+        Some(home) => {
+            let documents = home.join("Documents");
+            if documents.is_dir() { documents } else { home }.to_string_lossy().into_owned()
+        }
+        None => dir,
+    }
+}
+
 fn doc_stem(app: &PhotocraftApp) -> String {
     app.session.active().map(|d| d.doc.name.rsplit_once('.').map_or(d.doc.name.clone(), |(a, _)| a.to_string())).unwrap_or_else(|| tl!("Untitled").into())
 }
@@ -131,7 +149,7 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                 // A relative path has an empty parent: treat it as no folder.
                 .filter(|d| !d.as_os_str().is_empty())
                 .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_else(|| droplet_default_dir(app));
+                .unwrap_or_else(|| user_default_dir(app));
             let r = form(
                 app,
                 id,
@@ -171,7 +189,7 @@ pub fn invoke(app: &mut PhotocraftApp, ctx: &egui::Context, id: &str, params: &V
                 .and_then(|p| std::path::Path::new(p).parent())
                 .filter(|d| !d.as_os_str().is_empty())
                 .map(|d| d.to_string_lossy().into_owned());
-            let folder = folder.unwrap_or_else(|| droplet_default_dir(app));
+            let folder = folder.unwrap_or_else(|| user_default_dir(app));
             let mut fields = with_remembered(app, id, json!({"tiff": true, "png": true, "dpi": 300, "width": "keep", "widthMm": 85.0, "folder": folder}));
             // The name states the resolution the dialog opens with (a remembered 600 included).
             let dpi = fields["dpi"].as_f64().unwrap_or(300.0).round();
