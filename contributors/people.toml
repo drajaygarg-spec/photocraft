@@ -170,6 +170,9 @@ sync_github_name = true
 display_name = "Netter"
 sync_github_name = false
 
+[people.Byxis]
+sync_github_name = true
+
 [people.drajaygarg-spec]
 real_name = "Ajay Garg"
 display_name = "Ajay Garg"
