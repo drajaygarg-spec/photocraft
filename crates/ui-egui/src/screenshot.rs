@@ -461,7 +461,7 @@ mod tests {
         // A folder where the PNG should go: writing it fails.
         std::fs::create_dir_all(d.join("2026-10-19 10-00-00.png")).unwrap();
         let pcraft = d.join("2026-10-19 10-00-00.pcraft");
-        app.save_in_place(pcraft.to_string_lossy().into_owned()).unwrap();
+        app.save_in_place(pcraft.to_string_lossy().into_owned(), crate::FormatChoices::default()).unwrap();
         assert!(app.ui.status_error, "the failed PNG is reported: {}", app.ui.status);
         assert!(app.ui.status.contains("PNG"), "{}", app.ui.status);
         let _ = std::fs::remove_dir_all(d);
@@ -512,7 +512,7 @@ mod tests {
         let before = std::fs::read(&png).unwrap();
         let g = crate::arrow_ui::geometry([5.0, 5.0], [50.0, 30.0], egui::Modifiers::NONE).unwrap();
         crate::arrow_ui::create(&mut app, &g);
-        app.save_in_place(pcraft.to_string_lossy().into_owned()).unwrap();
+        app.save_in_place(pcraft.to_string_lossy().into_owned(), crate::FormatChoices::default()).unwrap();
         assert_ne!(std::fs::read(&png).unwrap(), before, "the PNG follows the save");
         // An automation save (control channel, MCP) refreshes the PNG as well.
         let before_auto = std::fs::read(&png).unwrap();
