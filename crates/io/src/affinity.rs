@@ -426,7 +426,7 @@ impl Builder {
                 arrow_end: None,
             })
         });
-        let mut sh = ShapeLayer { path, fill, stroke, live: None, cache: None, psd_raw: None };
+        let mut sh = ShapeLayer { path, fill, stroke, ..ShapeLayer::default() };
         sh.cache = Some(photocraft_vector::render_shape(&sh, self.format, self.canvas));
         sh
     }
