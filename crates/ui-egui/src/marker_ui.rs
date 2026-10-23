@@ -138,7 +138,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     }
     let color = o.color;
     let paint = photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(color[0], color[1], color[2], color[3]));
-    if let Some(crate::vector_ui::PaintChange::Color(c)) = crate::vector_ui::swatch(ui, Some(&paint), color, tl!("Marker color")) {
+    if let Some(crate::shape_paint_ui::PaintChange::Color(c)) = crate::shape_paint_ui::swatch(ui, Some(&paint), color, tl!("Marker color")) {
         app.ui.tool_options.marker.color = c;
     }
     crate::widgets::checkbox(ui, &mut app.ui.tool_options.marker.outline, tl!("Outline"));

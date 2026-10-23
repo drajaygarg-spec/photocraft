@@ -68,7 +68,7 @@ impl ArrowOptions {
     }
 
     fn of(stroke: &photocraft_doc::ShapeStroke, outline: bool) -> Option<Self> {
-        let color = crate::vector_ui::color_of(&stroke.paint)?;
+        let color = crate::shape_paint_ui::color_of(&stroke.paint)?;
         Some(ArrowOptions { color, width: stroke.width, style: StrokeOptions::from(stroke), outline, curved: false })
     }
 
@@ -448,7 +448,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     crate::widgets::vline(ui, 22.0);
     lbl(ui, tl!("Color:"));
     let paint = photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(current.color[0], current.color[1], current.color[2], current.color[3]));
-    if let Some(crate::vector_ui::PaintChange::Color(c)) = crate::vector_ui::swatch(ui, Some(&paint), current.color, tl!("Arrow color")) {
+    if let Some(crate::shape_paint_ui::PaintChange::Color(c)) = crate::shape_paint_ui::swatch(ui, Some(&paint), current.color, tl!("Arrow color")) {
         next.color = c;
         coalesce = Some("color");
     }
