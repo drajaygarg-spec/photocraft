@@ -252,6 +252,9 @@ sync_github_name = true
 [people.benandez]
 real_name = "Martin Ball"
 
+[people.drunkeninja42]
+real_name = "Kushagra Sharma"
+
 [people.drajaygarg-spec]
 real_name = "Ajay Garg"
 display_name = "Ajay Garg"
