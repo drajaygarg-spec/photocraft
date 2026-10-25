@@ -159,12 +159,12 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     let o = &mut app.ui.tool_options.cut_out;
     lbl(ui, tl!("Direction:"));
     let dirs = [("auto".to_string(), "Auto (follow the drag)"), ("vertical".to_string(), "Vertical band"), ("horizontal".to_string(), "Horizontal band")];
-    crate::widgets::dropdown(ui, "cut-out-axis", &mut o.direction, &dirs, 170.0);
+    crate::widgets::dropdown(ui, "cut-out-axis", tl!("Direction:"), &mut o.direction, &dirs, 170.0);
     crate::widgets::vline(ui, 22.0);
     lbl(ui, tl!("Edge:"));
     let mut edge = o.edge.clone();
     let edges = [("straight".to_string(), "Straight"), ("sawtooth".to_string(), "Sawtooth"), ("wave".to_string(), "Wave")];
-    if crate::widgets::dropdown(ui, "cut-out-edge", &mut edge, &edges, 96.0) {
+    if crate::widgets::dropdown(ui, "cut-out-edge", tl!("Edge:"), &mut edge, &edges, 96.0) {
         o.edge = edge;
     }
     let styled = o.edge != "straight";

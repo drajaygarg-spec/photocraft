@@ -1,562 +1,648 @@
-//! Screenshots and the screenshot library, Snagit-style (File › New Screenshot, File › Screenshot
-//! Library…).
+//! The control channel's `ui.screenshot`: bounded, cancelable capture requests.
 //!
-//! New Screenshot hides PhotoCraft, runs the system's interactive capture (macOS `screencapture
-//! -i`: drag a region, Space for a window, Esc to cancel), then brings PhotoCraft back with the
-//! capture open. Every capture goes to the library folder (Pictures › PhotoCraft Screenshots by
-//! default) named by its date and time, `2026-10-15 18-42-07.png`, plus an editable PhotoCraft
-//! document of the same name (`.pcraft`), which is what opens. Arrows, labels and markers stay
-//! editable layers in the `.pcraft`; every save of it also rewrites the `.png` beside it, so the
-//! library always holds an up-to-date PNG to insert anywhere.
+//! egui 0.37 removed `Event::Screenshot`/`UserData`; `ViewportCommand::Screenshot` now carries a
+//! one-shot callback that may run on an arbitrary thread. The shared `craft_ui::capture` slot is
+//! the only correlation primitive: it stores at most one image, validates it against a per-image
+//! byte bound, wakes the owning viewport, and makes a late result after cancellation or drop
+//! inert. This module owns everything the slot deliberately leaves to the application:
+//!
+//! - request identity (token, output path, reply), deadlines and settling policy;
+//! - the 4-request / 128 MiB-per-image / 256 MiB-aggregate admission budget, counted over
+//!   outstanding (issued, completed-but-undrained and unissued) requests. A request that arrives
+//!   before the first UI pass has recorded the geometry waits (bounded by the same count and
+//!   deadline) instead of failing, so a launch-and-capture client behaves as it did on 0.15;
+//! - the document/activation identity captured at admission, which is never rebound (the
+//!   revision is recorded for attribution only);
+//! - the capture geometry epoch recorded at issuance, so an image is only saved for the layout it
+//!   was actually rendered from. Any size, scale, zoom, texture-side or minimized change advances
+//!   the epoch, and an epoch advance between issuance and collection is a retry even when the
+//!   values change back;
+//! - a monotonic clock (`web_time::Instant`) for settling, retries and timeouts. Never
+//!   `ctx.input(|i| i.time)` (stale in `run_logic`) and never the wall clock (NTP can jump).
+//!
+//! Nothing here writes a file or encodes a PNG: completed images are handed back to the UI thread,
+//! which owns the automation writer ([`crate::control::save_screenshot_rgba`]).
+//!
+//! Issuance and the geometry epoch are UI-phase work ([`Captures::issue`] is called from
+//! `App::ui`); draining, admission and hidden-paint requests are logic work. A hidden `run_logic`
+//! tick never counts as a settling frame and never issues a capture.
+//!
+//! Limitation: an invisible same-size surface recreation (a backend swap that reports the same
+//! size, scale and zoom) cannot be observed from egui's input and is not detected here.
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
+use std::time::Duration;
 
-use serde_json::{Value, json};
+use craft_ui::capture::CaptureSlot;
+use egui::{ColorImage, Context, ScreenshotCallback, ViewportId};
+use web_time::Instant;
 
-use crate::PhotocraftApp;
+use crate::control::ControlResponse;
 
-/// The library folder's name under the user's Pictures folder.
-const FOLDER: &str = "PhotoCraft Screenshots";
-/// Where the library folder setting is kept (`prefs.dialogs`).
-const PREF: &str = "screenshot.library";
-/// Time for the window to leave the screen before the capture starts.
-#[cfg(target_os = "macos")]
-const HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+/// At most this many requests may be outstanding at once (issued, completed, waiting for
+/// geometry or waiting to be issued).
+pub const MAX_PENDING: usize = 4;
+/// Largest single image the slot may retain, and the largest a request may reserve.
+pub const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+/// Aggregate reserved bytes over every outstanding request.
+pub const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+/// A request expires after this long, including retries and settling.
+pub const DEADLINE: Duration = Duration::from_secs(8);
+/// UI passes a request waits before it is issued, on top of the animation delay.
+pub const SETTLE_PASSES: u32 = 3;
+/// Retries after the layout/geometry changed while a capture was in flight.
+pub const MAX_RETRIES: u8 = 2;
+/// The base delay that lets modal/popup open-close animations finish.
+const BASE_SETTLE_MS: f64 = 60.0;
 
-/// A capture in progress: the PNG path it writes and the capture thread's answer.
-pub struct Pending {
-    png: PathBuf,
-    done: Receiver<Result<bool, String>>,
+/// The document identity a screenshot belongs to. Never rebound after admission.
+///
+/// `generation` is the session's monotonic active-document generation. It changes whenever a
+/// different document becomes active, including a switch away and back inside one pass, so an
+/// image is never attributed to a document the pass did not stably show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentId {
+    pub document: u64,
+    pub revision: u64,
+    pub generation: u64,
 }
 
-/// The library folder: the one chosen in the library window, else Pictures › PhotoCraft Screenshots.
-pub fn library_dir(app: &PhotocraftApp) -> PathBuf {
-    if let Some(dir) = app.session.prefs().dialogs.get(PREF).and_then(|v| v.get("folder")).and_then(Value::as_str).filter(|d| !d.is_empty()) {
-        return PathBuf::from(dir);
+impl DocumentId {
+    /// Request identity is the document, not its revision: an edit while a capture is in flight
+    /// must not throw the image away. The revision is recorded for attribution only.
+    pub fn same_document(self, other: Self) -> bool {
+        self.document == other.document
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join("Pictures").join(FOLDER)
-}
 
-/// A file stem for a capture taken at `stamp` (`YYYY-MM-DD HH-MM-SS`, the local time), made unique
-/// in `dir` with " 2", " 3"… when two captures land in the same second.
-pub fn unique_stem(dir: &Path, stamp: &str) -> String {
-    let taken = |s: &str| dir.join(format!("{s}.png")).exists() || dir.join(format!("{s}.pcraft")).exists();
-    if !taken(stamp) {
-        return stamp.to_string();
-    }
-    (2..1000).map(|n| format!("{stamp} {n}")).find(|s| !taken(s)).unwrap_or_else(|| format!("{stamp} {}", std::process::id()))
-}
-
-/// The local date and time as `YYYY-MM-DD HH-MM-SS` (colons are not allowed in macOS file names).
-fn local_stamp() -> Result<String, String> {
-    let out = std::process::Command::new("/bin/date").arg("+%Y-%m-%d %H-%M-%S").output().map_err(|e| format!("Could not read the time: {e}"))?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.len() == 19 { Ok(s) } else { Err("Could not read the time".into()) }
-}
-
-/// File › New Screenshot: hides PhotoCraft and starts the system capture on a worker thread;
-/// [`tick`] finishes it.
-pub fn start(app: &mut PhotocraftApp, ctx: &egui::Context) -> Result<Value, String> {
-    if !cfg!(target_os = "macos") {
-        return Err(tl!("Screenshots are available on macOS for now").into());
-    }
-    if app.screenshot.is_some() {
-        return Err(tl!("A screenshot is already being taken").into());
-    }
-    let dir = library_dir(app);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let png = dir.join(format!("{}.png", unique_stem(&dir, &local_stamp()?)));
-    let (tx, rx) = std::sync::mpsc::channel();
-    let target = png.clone();
-    let wake = ctx.clone();
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-    std::thread::Builder::new()
-        .name("screenshot".into())
-        .spawn(move || {
-            let _ = tx.send(capture(&target));
-            wake.request_repaint();
-        })
-        .map_err(|e| format!("Could not start the screenshot: {e}"))?;
-    app.screenshot = Some(Pending { png: png.clone(), done: rx });
-    Ok(json!({"path": png.to_string_lossy()}))
-}
-
-/// Runs the interactive capture into `png`. Ok(false): cancelled (Esc).
-#[cfg(target_os = "macos")]
-fn capture(png: &Path) -> Result<bool, String> {
-    std::thread::sleep(HIDE_DELAY);
-    let status = std::process::Command::new("/usr/sbin/screencapture")
-        .args(["-i", "-x", "-t", "png"])
-        .arg(png)
-        .status()
-        .map_err(|e| format!("Could not start the screen capture: {e}"))?;
-    if !status.success() {
-        let app = running_app_name();
-        return Err(crate::i18n::fmt(
-            tl!("The screen capture failed. Allow {app} in System Settings › Privacy & Security › Screen Recording"),
-            &[("app", app.as_str())],
-        ));
-    }
-    Ok(png.exists())
-}
-
-/// The name of the app bundle this runs from (the one macOS asks permission for), e.g.
-/// "PhotoCraft" or "PhotoCraft Dev"; "PhotoCraft" when not run from a bundle.
-#[cfg(target_os = "macos")]
-fn running_app_name() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.ancestors().find_map(|a| a.file_name()?.to_str()?.strip_suffix(".app").map(str::to_string)))
-        .unwrap_or_else(|| "PhotoCraft".to_string())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn capture(_: &Path) -> Result<bool, String> {
-    Ok(false)
-}
-
-/// Each frame: when a capture finished, bring PhotoCraft back and open it for editing.
-pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    handle_request(app, ctx);
-    let Some(p) = app.screenshot.as_ref() else { return };
-    let result = match p.done.try_recv() {
-        Err(TryRecvError::Empty) => return,
-        Ok(r) => r,
-        Err(TryRecvError::Disconnected) => Err("The screen capture stopped".into()),
-    };
-    let png = p.png.clone();
-    app.screenshot = None;
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    let opened = match result {
-        Ok(true) => store(app, &png).and_then(|pcraft| app.open_path(&pcraft.to_string_lossy()).map(|_| pcraft)),
-        Ok(false) => return,
-        Err(e) => Err(e),
-    };
-    match opened {
-        Ok(pcraft) => {
-            let name = pcraft.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            app.ui.status = crate::i18n::fmt(tl!("Screenshot {name} saved to the library"), &[("name", name.as_str())]);
-            app.ui.status_error = false;
-        }
-        Err(e) => {
-            app.ui.status = e;
-            app.ui.status_error = true;
-        }
+    /// The same document in the same activation: an intervening switch away and back fails it.
+    pub fn same_activation(self, other: Self) -> bool {
+        self.same_document(other) && self.generation == other.generation
     }
 }
 
-/// Writes the editable `.pcraft` beside a captured `png` and returns its path.
-pub fn store(app: &mut PhotocraftApp, png: &Path) -> Result<PathBuf, String> {
-    let pcraft = png.with_extension("pcraft");
-    let bytes = std::fs::read(png).map_err(|e| format!("{}: {e}", png.display()))?;
-    let mut doc = photocraft_io::import(&png.to_string_lossy(), &bytes).map_err(|e| e.to_string())?.document;
-    doc.name = pcraft.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let export = app.services.export.as_ref().ok_or("no exporter configured")?;
-    let (out, _) = export(&doc, &pcraft.to_string_lossy(), &app.save_settings())?;
-    let write = app.services.write.as_mut().ok_or("no writer configured")?;
-    write(&pcraft.to_string_lossy(), &out)?;
-    Ok(pcraft)
+/// The viewport geometry an image is expected to have.
+///
+/// Position is deliberately absent: moving a window does not change the captured surface. Size,
+/// scale, zoom, the texture-side limit and the minimized state do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptureGeometry {
+    pub viewport: ViewportId,
+    pub logical_size: egui::Vec2,
+    pub pixels_per_point: f32,
+    pub zoom_factor: f32,
+    pub max_texture_side: usize,
+    pub minimized: bool,
+    pub document: Option<DocumentId>,
 }
 
-/// The file to open for `path`: a PNG in the library opens as its editable `.pcraft` (made the
-/// first time), however it arrives (PhotoCraft Capture, Finder, Open With, File › Open).
-pub fn editable(app: &mut PhotocraftApp, path: &str) -> String {
-    let p = Path::new(path);
-    let in_library = p.parent().is_some_and(|d| same_dir(d, &library_dir(app)));
-    if !in_library || !p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("png")) {
-        return path.to_string();
-    }
-    let pcraft = p.with_extension("pcraft");
-    if pcraft.exists() {
-        return pcraft.to_string_lossy().into_owned();
-    }
-    store(app, p).map_or_else(|_| path.to_string(), |pc| pc.to_string_lossy().into_owned())
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
-}
-
-/// After a save of the active document to `path`: a library `.pcraft` also rewrites its `.png`.
-/// Returns the message to show when the PNG could not be written (the caller shows it after its
-/// own "Saved" status, so neither hides the other).
-pub fn after_save(app: &mut PhotocraftApp, path: &str) -> Option<String> {
-    let p = Path::new(path);
-    if p.extension().and_then(|e| e.to_str()) != Some("pcraft") || !p.parent().is_some_and(|d| same_dir(d, &library_dir(app))) {
-        return None;
-    }
-    let png = p.with_extension("png").to_string_lossy().into_owned();
-    let r = (|| -> Result<(), String> {
-        let st = app.session.active().ok_or("no document")?;
-        let export = app.services.export.as_ref().ok_or("no exporter configured")?;
-        let (bytes, _) = export(&st.doc, &png, &crate::ExportSettings::default())?;
-        let write = app.services.write.as_mut().ok_or("no writer configured")?;
-        write(&png, &bytes)
-    })();
-    r.err().map(|e| crate::i18n::fmt(tl!("Saved, but the library PNG could not be updated: {error}"), &[("error", e.as_str())]))
-}
-
-/// The library's screenshots, newest first: (stem, the file to open, the PNG for its thumbnail).
-pub fn entries(dir: &Path) -> Vec<(String, PathBuf, PathBuf)> {
-    let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut stems: Vec<String> = read
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            let ext = p.extension()?.to_str()?.to_ascii_lowercase();
-            (ext == "png" || ext == "pcraft").then(|| p.file_stem()?.to_str().map(str::to_string)).flatten()
-        })
-        .collect();
-    stems.sort();
-    stems.dedup();
-    // Newest capture first, by when the file was made: names differ between PhotoCraft
-    // ("2026-10-15 18-42-07") and the system's ⌘⇧4 ("Screenshot 2026-10-15 at 18.42.07"),
-    // so they don't sort by time on their own.
-    let made = |p: &Path| std::fs::metadata(p).and_then(|m| m.created().or_else(|_| m.modified())).ok();
-    let mut list: Vec<(Option<std::time::SystemTime>, String, PathBuf, PathBuf)> = stems
-        .into_iter()
-        .map(|s| {
-            let (pcraft, png) = (dir.join(format!("{s}.pcraft")), dir.join(format!("{s}.png")));
-            let when = made(&png).or_else(|| made(&pcraft));
-            let open = if pcraft.exists() { pcraft } else { png.clone() };
-            (when, s, open, png)
-        })
-        .collect();
-    list.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    list.into_iter().map(|(_, s, open, png)| (s, open, png)).collect()
-}
-
-// ---------------------------------------------------------------------------------------------
-// Screenshot Library window
-
-const MARK: &str = "__screenshots";
-/// Thumbnails shown at most (newest first).
-const SHOWN: usize = 60;
-/// Thumbnail box in points.
-const THUMB: f32 = 150.0;
-
-pub fn owns(f: &serde_json::Map<String, Value>) -> bool {
-    f.contains_key(MARK)
-}
-
-/// File › Screenshot Library…: the library's screenshots as thumbnails, newest first.
-pub fn open_library(app: &mut PhotocraftApp) -> Value {
-    let mut f = serde_json::Map::new();
-    f.insert(MARK.into(), json!(true));
-    f.insert("__label".into(), json!(tl!("Screenshot Library")));
-    json!({"dialog": app.ui.open_dialog(crate::state::DialogKind::Command, f)})
-}
-
-/// A click in the library window, carried to [`tick`] (the window only reads the app).
-#[derive(Clone, Debug)]
-enum Request {
-    Open(PathBuf),
-    New,
-    Reveal(PathBuf),
-    ChooseFolder,
-}
-
-fn request_id() -> egui::Id {
-    egui::Id::new("screenshot-library-request")
-}
-
-pub fn body(app: &PhotocraftApp, ui: &mut egui::Ui) {
-    let dir = library_dir(app);
-    let list = cached_entries(ui.ctx(), &dir);
-    let request = |ui: &egui::Ui, r: Request| ui.ctx().data_mut(|d| d.insert_temp(request_id(), r));
-    ui.horizontal(|ui| {
-        if crate::widgets::primary_button(ui, tl!("New Screenshot"), 150.0).clicked() {
-            request(ui, Request::New);
-        }
-        if ui.button(tl!("Show in Finder")).clicked() {
-            request(ui, Request::Reveal(dir.clone()));
-        }
-        if ui.button(tl!("Change Folder…")).clicked() {
-            request(ui, Request::ChooseFolder);
-        }
-    });
-    ui.label(egui::RichText::new(dir.to_string_lossy()).small());
-    ui.separator();
-    if list.is_empty() {
-        ui.label(tl!("No screenshots yet. Use New Screenshot to take one."));
-        return;
-    }
-    let columns = ((ui.available_width() / (THUMB + 12.0)).floor() as usize).clamp(1, 6);
-    egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
-        egui::Grid::new("screenshot-library").spacing([12.0, 12.0]).show(ui, |ui| {
-            for (i, (stem, open, png)) in list.iter().take(SHOWN).enumerate() {
-                ui.vertical(|ui| {
-                    ui.set_width(THUMB);
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(THUMB, THUMB * 0.66), egui::Sense::click());
-                    let t = crate::theme::Tokens::get(ui.ctx());
-                    ui.painter().rect_filled(rect, t.radius_sm, t.field);
-                    if let Some(tex) = thumbnail(ui.ctx(), png) {
-                        let size = tex.size_vec2();
-                        let k = (rect.width() / size.x).min(rect.height() / size.y);
-                        let r = egui::Rect::from_center_size(rect.center(), size * k);
-                        ui.painter().image(tex.id(), r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-                    }
-                    let border = if resp.hovered() { t.accent } else { t.field_border };
-                    ui.painter().rect_stroke(rect, t.radius_sm, egui::Stroke::new(1.0, border), egui::StrokeKind::Inside);
-                    let resp = resp.on_hover_text(tl!("Open for editing"));
-                    if resp.clicked() {
-                        request(ui, Request::Open(open.clone()));
-                    }
-                    ui.label(egui::RichText::new(stem).small());
-                });
-                if (i + 1) % columns == 0 {
-                    ui.end_row();
-                }
-            }
+impl CaptureGeometry {
+    /// Current input/host viewport geometry. A full pass refreshes all input before logic;
+    /// run_logic refreshes viewport metadata while retaining the previous UI screen rectangle.
+    pub fn current(ctx: &Context, document: Option<DocumentId>) -> Self {
+        let (viewport, logical_size, minimized, native_scale) = ctx.input(|i| {
+            let size = i.viewport().inner_rect.map_or_else(|| i.viewport_rect().size(), |r| r.size());
+            (i.raw.viewport_id, size, i.viewport().minimized.unwrap_or(false), i.viewport().native_pixels_per_point)
         });
-    });
-}
-
-/// [`entries`] for the library window, read again only when the folder changes (a file added,
-/// removed or renamed moves its modification time), not on every frame. Thumbnails are decoded
-/// once per file version ([`thumbnail`]).
-/// A library listing with the folder modification time it was read at.
-type CachedEntries = (Option<std::time::SystemTime>, Vec<(String, PathBuf, PathBuf)>);
-
-fn cached_entries(ctx: &egui::Context, dir: &Path) -> Vec<(String, PathBuf, PathBuf)> {
-    let modified = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
-    // One entry per folder, replaced when the folder changes, so stale lists don't pile up.
-    let key = egui::Id::new(("screenshot-entries", dir.to_path_buf()));
-    if let Some((at, list)) = ctx.data(|d| d.get_temp::<CachedEntries>(key))
-        && at == modified
-    {
-        return list;
+        Self {
+            viewport,
+            logical_size,
+            pixels_per_point: native_scale
+                .filter(|scale| scale.is_finite() && *scale > 0.0)
+                .map_or_else(|| ctx.pixels_per_point(), |scale| scale * ctx.zoom_factor()),
+            zoom_factor: ctx.zoom_factor(),
+            max_texture_side: ctx.input(|i| i.max_texture_side),
+            minimized,
+            document,
+        }
     }
-    let list = entries(dir);
-    ctx.data_mut(|d| d.insert_temp::<CachedEntries>(key, (modified, list.clone())));
-    list
-}
 
-/// A thumbnail of `png`, decoded once per file version and kept for the session.
-fn thumbnail(ctx: &egui::Context, png: &Path) -> Option<egui::TextureHandle> {
-    let modified = std::fs::metadata(png).and_then(|m| m.modified()).ok()?;
-    let key = egui::Id::new(("screenshot-thumb", png.to_path_buf(), modified));
-    if let Some(t) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(key)) {
-        return t;
+    /// The identity compared for stale-image rejection. Window movement and the document identity
+    /// are separate concerns (the latter is compared exactly and never retried).
+    fn epoch_key(&self) -> EpochKey {
+        EpochKey {
+            viewport: self.viewport,
+            width: self.logical_size.x,
+            height: self.logical_size.y,
+            ppp: self.pixels_per_point,
+            zoom: self.zoom_factor,
+            max_texture_side: self.max_texture_side,
+            minimized: self.minimized,
+        }
     }
-    let made = (|| {
-        let bytes = std::fs::read(png).ok()?;
-        let doc = photocraft_io::import(&png.to_string_lossy(), &bytes).ok()?.document;
-        let buf = photocraft_compose::flatten(&doc);
-        let (w, h) = (buf.rect.width() as usize, buf.rect.height() as usize);
-        if w == 0 || h == 0 || buf.px.len() < w * h {
+
+    /// The expected image size in pixels, from the logical size and the point scale.
+    ///
+    /// `None` for a degenerate viewport; a request is rejected before issuance rather than
+    /// guessing. A window larger than `max_texture_side` may be fitted by the renderer (E2), so
+    /// the size itself is not rejected here; [`check_image`] accepts a uniform fit bounded by
+    /// that texture side.
+    pub fn expected_pixels(&self) -> Option<[usize; 2]> {
+        let valid = |v: f32| v.is_finite() && v > 0.0;
+        if !valid(self.logical_size.x) || !valid(self.logical_size.y) || !valid(self.pixels_per_point) || !valid(self.zoom_factor) {
             return None;
         }
-        // Nearest sampling to at most 300 px (thumbnails are 150 pt on a 2× display).
-        let k = (300.0 / w.max(h) as f32).min(1.0);
-        let (tw, th) = (((w as f32 * k).round() as usize).max(1), ((h as f32 * k).round() as usize).max(1));
-        let mut rgba = Vec::with_capacity(tw * th * 4);
-        for y in 0..th {
-            for x in 0..tw {
-                let p = buf.px.get((y * h / th) * w + x * w / tw).copied().unwrap_or([0.0; 4]);
-                rgba.extend(p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+        let w = (self.logical_size.x * self.pixels_per_point).round();
+        let h = (self.logical_size.y * self.pixels_per_point).round();
+        if w < 1.0 || h < 1.0 || w > usize::MAX as f32 || h > usize::MAX as f32 {
+            return None;
+        }
+        Some([w as usize, h as usize])
+    }
+
+    /// The retained bytes this geometry reserves, from checked arithmetic.
+    pub fn expected_bytes(&self) -> Option<usize> {
+        let [w, h] = self.expected_pixels()?;
+        w.checked_mul(h)?.checked_mul(std::mem::size_of::<egui::Color32>())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EpochKey {
+    viewport: ViewportId,
+    width: f32,
+    height: f32,
+    ppp: f32,
+    zoom: f32,
+    max_texture_side: usize,
+    minimized: bool,
+}
+
+/// One request that arrived before a UI pass had recorded the window geometry. It is admitted on
+/// the first logic tick after that pass, within the same count/deadline budget.
+struct WaitingAdmit {
+    token: u64,
+    path: Option<String>,
+    reply: std::sync::mpsc::Sender<ControlResponse>,
+    document: Option<DocumentId>,
+    settle_ms: f64,
+    arrived: Instant,
+    deadline: Instant,
+}
+
+/// One outstanding request. The record is app-owned and holds the strong slot; the screenshot
+/// callback only holds a weak reference to the slot's state.
+pub struct PendingCapture {
+    token: u64,
+    path: Option<String>,
+    reply: Option<std::sync::mpsc::Sender<ControlResponse>>,
+    deadline: Instant,
+    ready_at: Instant,
+    settle_passes: u32,
+    geometry: CaptureGeometry,
+    /// Geometry epoch of `geometry`: at admission, and again whenever it is finalized after a
+    /// layout change. Issuance restarts settling when it differs from the current epoch.
+    epoch: u64,
+    /// Epoch of the UI pass the capture command was issued from. A later advance is a retry.
+    issued_epoch: Option<u64>,
+    reserved_bytes: usize,
+    document: Option<DocumentId>,
+    issued: bool,
+    slot: Option<CaptureSlot>,
+    retries: u8,
+}
+
+impl PendingCapture {
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+
+    pub fn issued(&self) -> bool {
+        self.issued
+    }
+}
+
+impl core::fmt::Debug for PendingCapture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingCapture")
+            .field("token", &self.token)
+            .field("issued", &self.issued)
+            .field("retries", &self.retries)
+            .field("epoch", &self.epoch)
+            .field("issued_epoch", &self.issued_epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A request that is over: saved-and-replied by the caller, or failed with `result`.
+pub struct Finished {
+    pub token: u64,
+    pub path: Option<String>,
+    pub reply: Option<std::sync::mpsc::Sender<ControlResponse>>,
+    pub result: Result<Arc<ColorImage>, String>,
+}
+
+impl core::fmt::Debug for Finished {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Finished").field("token", &self.token).field("path", &self.path).field("ok", &self.result.is_ok()).finish_non_exhaustive()
+    }
+}
+
+/// The screenshot request queue and its admission budget.
+#[derive(Default)]
+pub struct Captures {
+    records: Vec<PendingCapture>,
+    /// Arrived before the first UI pass recorded the geometry.
+    waiting: Vec<WaitingAdmit>,
+    geometry: Option<CaptureGeometry>,
+    epoch: u64,
+}
+
+impl Captures {
+    /// Every outstanding request, including ones still waiting for the first UI pass.
+    pub fn pending(&self) -> usize {
+        self.records.len().saturating_add(self.waiting.len())
+    }
+
+    pub fn reserved_bytes(&self) -> usize {
+        self.records.iter().map(|r| r.reserved_bytes).sum()
+    }
+
+    pub fn any_pending(&self) -> bool {
+        !self.records.is_empty() || !self.waiting.is_empty()
+    }
+
+    /// Requests still waiting to be issued; only these need `RequestPaintWhileHidden` from logic
+    /// (an issued capture's own `Screenshot` command forces its paint).
+    pub fn any_unissued(&self) -> bool {
+        !self.waiting.is_empty() || self.records.iter().any(|r| !r.issued)
+    }
+
+    pub fn last_geometry(&self) -> Option<CaptureGeometry> {
+        self.geometry
+    }
+
+    /// Observe host/input geometry before callback delivery or UI issuance. This may advance the
+    /// epoch in logic, but never counts a settling pass: only App::ui calls note_pass.
+    pub fn note_geometry(&mut self, geometry: CaptureGeometry) -> u64 {
+        let changed = self.geometry.is_none_or(|old| old.epoch_key() != geometry.epoch_key());
+        if changed {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
+        self.geometry = Some(geometry);
+        self.epoch
+    }
+
+    /// Admit a request before it is issued. The queue must have been drained first, so completed
+    /// images have already released their budget. With no UI pass yet (a launch-and-capture
+    /// client) the request is parked within the same count and deadline budget.
+    pub fn admit(
+        &mut self,
+        token: u64,
+        path: Option<String>,
+        reply: std::sync::mpsc::Sender<ControlResponse>,
+        document: Option<DocumentId>,
+        settle_ms: f64,
+        now: Instant,
+    ) -> Result<(), (std::sync::mpsc::Sender<ControlResponse>, String)> {
+        let reject = |reply: std::sync::mpsc::Sender<ControlResponse>, e: String| Err((reply, e));
+        if self.records.iter().any(|r| r.token == token) || self.waiting.iter().any(|w| w.token == token) {
+            return reject(reply, format!("screenshot token {token} is already pending"));
+        }
+        if self.pending() >= MAX_PENDING {
+            return reject(reply, format!("too many screenshots pending (at most {MAX_PENDING})"));
+        }
+        if self.geometry.is_none() {
+            self.waiting.push(WaitingAdmit { token, path, reply, document, settle_ms, arrived: now, deadline: now + DEADLINE });
+            return Ok(());
+        }
+        self.admit_with_geometry(token, path, reply, document, settle_ms, now)
+    }
+
+    /// Admit requests parked before the first UI pass, once the geometry is known. Called from
+    /// logic before `drain` processes completions; expired parked requests get their error here.
+    pub fn admit_waiting(&mut self, now: Instant) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        let parked = std::mem::take(&mut self.waiting);
+        let mut still_waiting = Vec::new();
+        for w in parked {
+            if now >= w.deadline {
+                let _ = w.reply.send(serde_json::json!({"ok": false, "error": timeout_error(w.token)}));
+                continue;
+            }
+            if self.geometry.is_none() {
+                still_waiting.push(w);
+                continue;
+            }
+            if let Err((reply, e)) = self.admit_with_geometry(w.token, w.path, w.reply, w.document, w.settle_ms, w.arrived) {
+                let _ = reply.send(serde_json::json!({"ok": false, "error": e}));
             }
         }
-        Some(ctx.load_texture(format!("screenshot-{}", png.display()), egui::ColorImage::from_rgba_unmultiplied([tw, th], &rgba), egui::TextureOptions::LINEAR))
-    })();
-    ctx.data_mut(|d| d.insert_temp(key, made.clone()));
-    made
-}
-
-/// Carries out a click in the library window (called every frame from [`tick`]).
-fn handle_request(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    let Some(r) = ctx.data(|d| d.get_temp::<Request>(request_id())) else { return };
-    ctx.data_mut(|d| d.remove::<Request>(request_id()));
-    let close = |app: &mut PhotocraftApp| app.ui.dialogs.retain(|d| !owns(&d.fields));
-    let result = match r {
-        Request::Open(path) => {
-            close(app);
-            // open_paths turns a library PNG into its editable copy (`editable`).
-            let opened = app.open_paths(&[path.to_string_lossy().into_owned()]);
-            if opened == 1 { Ok(()) } else { Err(tl!("Could not open the screenshot").to_string()) }
-        }
-        Request::New => {
-            close(app);
-            start(app, ctx).map(|_| ())
-        }
-        Request::Reveal(dir) => {
-            let _ = std::fs::create_dir_all(&dir);
-            std::process::Command::new("/usr/bin/open").arg(&dir).spawn().map(|_| ()).map_err(|e| e.to_string())
-        }
-        Request::ChooseFolder => app
-            .ask_folder(|app, path| {
-                app.session.edit_prefs(|p| {
-                    p.dialogs.insert(PREF.into(), json!({"folder": path}));
-                });
-                Ok(Value::Null)
-            })
-            .map(|_| ()),
-    };
-    if let Err(e) = result {
-        app.ui.status = e;
-        app.ui.status_error = true;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("photocraft-shots-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        self.waiting = still_waiting;
     }
 
-    #[test]
-    fn the_menu_items_are_enabled_without_a_document() {
-        let app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
-        assert!(crate::menus::is_enabled(&app, "file.screenshot.library"));
-        assert_eq!(crate::menus::is_enabled(&app, "file.screenshot.new"), cfg!(target_os = "macos"));
-    }
-
-    #[test]
-    fn the_library_listing_is_cached_once_per_folder() {
-        let d = dir("cache");
-        let ctx = egui::Context::default();
-        assert!(cached_entries(&ctx, &d).is_empty());
-        std::fs::write(d.join("2026-10-15 18-42-07.png"), b"x").unwrap();
-        // The folder changed: the listing is read again and replaces the old one.
-        let set_time = |secs: u64| {
-            let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
-            std::fs::File::open(&d).and_then(|f| f.set_modified(t)).unwrap();
+    fn admit_with_geometry(
+        &mut self,
+        token: u64,
+        path: Option<String>,
+        reply: std::sync::mpsc::Sender<ControlResponse>,
+        document: Option<DocumentId>,
+        settle_ms: f64,
+        now: Instant,
+    ) -> Result<(), (std::sync::mpsc::Sender<ControlResponse>, String)> {
+        // The reply is returned on every rejection so the caller can still answer exactly once.
+        let reject = |reply: std::sync::mpsc::Sender<ControlResponse>, e: String| Err((reply, e));
+        if self.records.iter().any(|r| r.token == token) {
+            return reject(reply, format!("screenshot token {token} is already pending"));
+        }
+        if self.records.len() >= MAX_PENDING {
+            return reject(reply, format!("too many screenshots pending (at most {MAX_PENDING})"));
+        }
+        let Some(geometry) = self.geometry else {
+            return reject(reply, "the window geometry is not known yet; try again after a frame has been drawn".into());
         };
-        set_time(2_000_000_000);
-        assert_eq!(cached_entries(&ctx, &d).len(), 1);
-        std::fs::write(d.join("2026-10-15 18-43-00.png"), b"x").unwrap();
-        set_time(2_000_000_100);
-        assert_eq!(cached_entries(&ctx, &d).len(), 2);
-        let key = egui::Id::new(("screenshot-entries", d.clone()));
-        let held: Option<CachedEntries> = ctx.data(|m| m.get_temp(key));
-        assert_eq!(held.map(|h| h.1.len()), Some(2), "one entry per folder, the latest listing");
-        let _ = std::fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn a_png_that_cannot_follow_the_save_is_reported() {
-        let d = dir("png-error");
-        let mut app = PhotocraftApp::new(
-            photocraft_engine::Session::new(),
-            crate::Services {
-                export: Some(Box::new(|doc, path, _| {
-                    photocraft_io::export(doc, path, &Default::default()).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
-                })),
-                write: Some(Box::new(|path, bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))),
-                ..Default::default()
-            },
-        );
-        app.session.edit_prefs(|p| {
-            p.dialogs.insert(PREF.into(), json!({"folder": d.to_string_lossy()}));
-        });
-        app.run("file.new", json!({"width": 20, "height": 20, "background": "white"})).unwrap();
-        // A folder where the PNG should go: writing it fails.
-        std::fs::create_dir_all(d.join("2026-10-19 10-00-00.png")).unwrap();
-        let pcraft = d.join("2026-10-19 10-00-00.pcraft");
-        app.save_in_place(pcraft.to_string_lossy().into_owned(), crate::FormatChoices::default()).unwrap();
-        assert!(app.ui.status_error, "the failed PNG is reported: {}", app.ui.status);
-        assert!(app.ui.status.contains("PNG"), "{}", app.ui.status);
-        let _ = std::fs::remove_dir_all(d);
-    }
-
-    #[test]
-    fn names_are_the_date_and_time_and_stay_unique() {
-        let d = dir("names");
-        assert_eq!(unique_stem(&d, "2026-10-15 18-42-07"), "2026-10-15 18-42-07");
-        std::fs::write(d.join("2026-10-15 18-42-07.png"), b"x").unwrap();
-        assert_eq!(unique_stem(&d, "2026-10-15 18-42-07"), "2026-10-15 18-42-07 2");
-        #[cfg(target_os = "macos")]
-        {
-            let s = local_stamp().unwrap();
-            assert!(s.len() == 19 && s.as_bytes()[4] == b'-' && s.as_bytes()[10] == b' ' && !s.contains(':'), "{s}");
+        let expected = match image_budget(&geometry) {
+            Ok(bytes) => bytes,
+            Err(e) => return reject(reply, e),
+        };
+        if let Err(e) = aggregate_budget(self.reserved_bytes(), expected) {
+            return reject(reply, e);
         }
-        let _ = std::fs::remove_dir_all(d);
+        // `Duration::from_secs_f64` panics on NaN/inf/negative: never trust a style value here.
+        let settle = if settle_ms.is_finite() { settle_ms.clamp(0.0, 2000.0) } else { BASE_SETTLE_MS };
+        self.records.push(PendingCapture {
+            token,
+            path,
+            reply: Some(reply),
+            deadline: now + DEADLINE,
+            ready_at: now + Duration::from_secs_f64(settle / 1000.0),
+            settle_passes: 0,
+            geometry,
+            epoch: self.epoch,
+            issued_epoch: None,
+            reserved_bytes: expected,
+            document,
+            issued: false,
+            slot: None,
+            retries: 0,
+        });
+        Ok(())
     }
 
-    #[test]
-    fn a_capture_becomes_an_editable_pair_and_saves_refresh_the_png() {
-        let d = dir("pair");
-        let mut app = PhotocraftApp::new(
-            photocraft_engine::Session::new(),
-            crate::Services {
-                import: Some(Box::new(|name, bytes, depth| {
-                    photocraft_io::import_with_options(name, bytes, depth).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
-                })),
-                export: Some(Box::new(|doc, path, _| {
-                    photocraft_io::export(doc, path, &Default::default()).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
-                })),
-                write: Some(Box::new(|path, bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))),
-                ..Default::default()
-            },
-        );
-        app.session.edit_prefs(|p| {
-            p.dialogs.insert(PREF.into(), json!({"folder": d.to_string_lossy()}));
-        });
-        // A "captured" PNG.
-        app.run("file.new", json!({"width": 64, "height": 40, "background": "white"})).unwrap();
-        let png = d.join("2026-10-15 18-42-07.png");
-        let bytes = photocraft_io::export(&app.session.active().unwrap().doc, &png.to_string_lossy(), &Default::default()).unwrap().bytes;
-        std::fs::write(&png, bytes).unwrap();
-        let pcraft = store(&mut app, &png).unwrap();
-        assert!(pcraft.exists() && pcraft.extension().unwrap() == "pcraft");
-        app.open_path(&pcraft.to_string_lossy()).unwrap();
-        // An arrow, then Save: the .pcraft keeps it as a layer and the PNG is rewritten.
-        let before = std::fs::read(&png).unwrap();
-        let g = crate::arrow_ui::geometry([5.0, 5.0], [50.0, 30.0], egui::Modifiers::NONE).unwrap();
-        crate::arrow_ui::create(&mut app, &g);
-        app.save_in_place(pcraft.to_string_lossy().into_owned(), crate::FormatChoices::default()).unwrap();
-        assert_ne!(std::fs::read(&png).unwrap(), before, "the PNG follows the save");
-        // An automation save (control channel, MCP) refreshes the PNG as well.
-        let before_auto = std::fs::read(&png).unwrap();
-        let g = crate::arrow_ui::geometry([5.0, 35.0], [60.0, 5.0], egui::Modifiers::NONE).unwrap();
-        crate::arrow_ui::create(&mut app, &g);
-        let st = app.session.active().unwrap();
-        let (doc, revision) = (st.doc.id, st.revision);
-        let bytes = photocraft_io::export(&st.doc, &pcraft.to_string_lossy(), &Default::default()).unwrap().bytes;
-        std::fs::write(&pcraft, bytes).unwrap();
-        app.saved_automation(doc, revision, &pcraft.to_string_lossy(), &[], false);
-        assert_ne!(std::fs::read(&png).unwrap(), before_auto, "an automation save refreshes the PNG too");
-        let reopened = photocraft_format::read_file(&pcraft).unwrap();
-        let doc = photocraft_io::import(&pcraft.to_string_lossy(), &reopened).unwrap().document;
-        assert!(doc.layers.iter().any(|l| l.name.starts_with("Arrow")), "the arrow is still a layer");
-        // The library lists it once, opening the editable file.
-        let list = entries(&d);
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].1, pcraft);
-        // A screenshot the system saved here (⌘⇧4) lists first, being newer, and opening it from
-        // the library makes its editable copy.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        let system = d.join("Screenshot 2026-10-15 at 19.01.02.png");
-        std::fs::copy(&png, &system).unwrap();
-        let list = entries(&d);
-        assert_eq!(list[0].1, system, "newest first");
-        app.ui.dialogs.clear();
-        app.ui.open_dialog(crate::state::DialogKind::Command, serde_json::Map::from_iter([(MARK.to_string(), json!(true))]));
-        let ctx = egui::Context::default();
-        // Opening a PNG from outside (Finder, PhotoCraft Capture) also gives the editable copy.
-        let other = d.join("Screenshot 2026-10-15 at 19.05.00.png");
-        std::fs::copy(&png, &other).unwrap();
-        assert_eq!(app.open_paths(&[other.to_string_lossy().into_owned()]), 1);
-        assert!(other.with_extension("pcraft").exists());
-        assert_eq!(app.session.active().and_then(|st| st.path.clone()), Some(other.with_extension("pcraft").to_string_lossy().into_owned()));
-        // So does a single open (Open Recent, a drop, File › Open with a path).
-        let recent = d.join("Screenshot 2026-10-15 at 19.06.00.png");
-        std::fs::copy(&png, &recent).unwrap();
-        app.open_path(&recent.to_string_lossy()).unwrap();
-        assert_eq!(app.session.active().and_then(|st| st.path.clone()), Some(recent.with_extension("pcraft").to_string_lossy().into_owned()));
-        ctx.data_mut(|data| data.insert_temp(request_id(), Request::Open(system.clone())));
-        handle_request(&mut app, &ctx);
-        assert!(system.with_extension("pcraft").exists(), "editable copy made");
-        assert!(app.ui.dialogs.is_empty(), "the library closes");
-        assert_eq!(app.session.active().and_then(|st| st.path.clone()), Some(system.with_extension("pcraft").to_string_lossy().into_owned()));
-        let _ = std::fs::remove_dir_all(d);
+    /// Count one UI pass towards settling (logic-only ticks never call this).
+    pub fn note_pass(&mut self) {
+        for r in &mut self.records {
+            r.settle_passes = r.settle_passes.saturating_add(1);
+        }
     }
+
+    /// Issue every due request. Call from `App::ui`; `send` installs the callback with
+    /// `ViewportCommand::Screenshot`. A headless test can capture the callbacks instead.
+    pub fn issue(&mut self, ctx: &Context, now: Instant, document: Option<DocumentId>, mut send: impl FnMut(ScreenshotCallback)) -> Vec<Finished> {
+        let mut finished = Vec::new();
+        let Some(current) = self.geometry else { return finished };
+        // The pass's start and end must show the same active document: a switch inside the pass
+        // means neither the drawn frame nor the pass's document identity is trustworthy.
+        let pass_changed = !same_activation(current.document, document);
+        for i in 0..self.records.len() {
+            if self.records[i].issued {
+                continue;
+            }
+            let token = self.records[i].token;
+            if now >= self.records[i].deadline {
+                finished.push(finish(&mut self.records[i], Err(timeout_error(token))));
+                continue;
+            }
+            if !same_activation(document, self.records[i].document) || !same_activation(current.document, self.records[i].document) {
+                finished.push(finish(&mut self.records[i], Err(document_changed_error(token))));
+                continue;
+            }
+            if pass_changed {
+                continue;
+            }
+            // A minimized window has no surface to read back; fail with an actionable error
+            // instead of waiting for the 8 s timeout.
+            if current.minimized {
+                finished.push(finish(&mut self.records[i], Err(format!("screenshot {token} failed: the window is minimized"))));
+                continue;
+            }
+            if self.records[i].settle_passes < SETTLE_PASSES || now < self.records[i].ready_at {
+                continue;
+            }
+            // No pixels exist yet: finalize the geometry at issuance, re-checking the budget, and
+            // let the new layout settle for another pass.
+            if self.records[i].epoch != self.epoch || current.epoch_key() != self.records[i].geometry.epoch_key() {
+                let others: usize = self.records.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.reserved_bytes).sum();
+                let epoch = self.epoch;
+                match revalidate_reservation(&mut self.records[i], others, current, epoch) {
+                    Ok(()) => {}
+                    Err(e) => finished.push(finish(&mut self.records[i], Err(e))),
+                }
+                continue;
+            }
+            let (slot, callback) = CaptureSlot::new(ctx, current.viewport, MAX_IMAGE_BYTES);
+            let r = &mut self.records[i];
+            r.slot = Some(slot);
+            r.issued = true;
+            r.issued_epoch = Some(self.epoch);
+            send(callback);
+        }
+        self.records.retain(|r| !finished.iter().any(|f| f.token == r.token));
+        finished
+    }
+
+    /// Collect completed requests and enforce deadlines. Call from logic. The deadline is checked
+    /// before a completed image is saved, so a callback that arrives late is a timeout, not a
+    /// successful capture.
+    pub fn drain(&mut self, now: Instant, current: Option<CaptureGeometry>, document: Option<DocumentId>) -> Vec<Finished> {
+        // Requests that arrived before the first UI pass start here, once its geometry is known.
+        self.admit_waiting(now);
+        let mut finished = Vec::new();
+        for i in 0..self.records.len() {
+            let token = self.records[i].token;
+            if now >= self.records[i].deadline {
+                if let Some(slot) = self.records[i].slot.take() {
+                    slot.cancel();
+                }
+                finished.push(finish(&mut self.records[i], Err(timeout_error(token))));
+                continue;
+            }
+            if !same_activation(document, self.records[i].document) || !same_activation(current.and_then(|c| c.document), self.records[i].document) {
+                if let Some(slot) = self.records[i].slot.take() {
+                    slot.cancel();
+                }
+                finished.push(finish(&mut self.records[i], Err(document_changed_error(token))));
+                continue;
+            }
+            let Some(slot) = self.records[i].slot.take() else { continue };
+            let Some(result) = slot.take() else {
+                // Still in flight: keep the live request (and its strong slot) in the record.
+                self.records[i].slot = Some(slot);
+                continue;
+            };
+            let image = match result {
+                Ok(image) => image,
+                Err(e) => {
+                    slot.cancel();
+                    finished.push(finish(&mut self.records[i], Err(format!("screenshot {token} failed: {e}"))));
+                    continue;
+                }
+            };
+            let Some(current) = current else {
+                finished.push(finish(&mut self.records[i], Err(format!("screenshot {token} failed: the window geometry is unknown"))));
+                continue;
+            };
+            // An epoch advance means the surface changed after issuance, even if it later came
+            // back to the same values: the image may belong to the intermediate layout.
+            let epoch_advanced = self.records[i].issued_epoch.is_none_or(|issued| issued != self.epoch);
+            let pass_mixed = !same_activation(current.document, document);
+            if epoch_advanced || current.epoch_key() != self.records[i].geometry.epoch_key() || pass_mixed {
+                slot.cancel();
+                if self.records[i].retries >= MAX_RETRIES {
+                    finished.push(finish(&mut self.records[i], Err(format!("screenshot {token} failed: the layout changed while it was captured"))));
+                    continue;
+                }
+                self.records[i].retries = self.records[i].retries.saturating_add(1);
+                let others: usize = self.records.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.reserved_bytes).sum();
+                let epoch = self.epoch;
+                match revalidate_reservation(&mut self.records[i], others, current, epoch) {
+                    Ok(()) => {
+                        self.records[i].ready_at = now;
+                    }
+                    Err(e) => finished.push(finish(&mut self.records[i], Err(e))),
+                }
+                continue;
+            }
+            if let Err(e) = check_image(&image, &self.records[i].geometry) {
+                finished.push(finish(&mut self.records[i], Err(format!("screenshot {token} failed: {e}"))));
+                continue;
+            }
+            slot.cancel();
+            finished.push(finish(&mut self.records[i], Ok(image)));
+        }
+        self.records.retain(|r| !finished.iter().any(|f| f.token == r.token));
+        finished
+    }
+
+    /// Drop every outstanding request (application exit). No reply is invented for a request that
+    /// was already finished; `Finished` still carries the sender so the caller can report it.
+    pub fn cancel_all(&mut self, reason: &str) -> Vec<Finished> {
+        let mut finished = Vec::new();
+        for w in self.waiting.drain(..) {
+            finished.push(Finished { token: w.token, path: w.path, reply: Some(w.reply), result: Err(format!("screenshot {} cancelled: {reason}", w.token)) });
+        }
+        for mut r in self.records.drain(..) {
+            if let Some(slot) = r.slot.take() {
+                slot.cancel();
+            }
+            finished.push(Finished {
+                token: r.token,
+                path: r.path.take(),
+                reply: r.reply.take(),
+                result: Err(format!("screenshot {} cancelled: {reason}", r.token)),
+            });
+        }
+        finished
+    }
+}
+
+/// The retained bytes a geometry may reserve, or the reason it cannot be captured at all.
+fn image_budget(geometry: &CaptureGeometry) -> Result<usize, String> {
+    let Some(expected) = geometry.expected_bytes() else {
+        return Err(format!(
+            "the viewport is not capturable ({}×{} points at {} px/pt, texture side {})",
+            geometry.logical_size.x, geometry.logical_size.y, geometry.pixels_per_point, geometry.max_texture_side
+        ));
+    };
+    if expected > MAX_IMAGE_BYTES {
+        return Err(format!("a {} MiB screenshot is over the {} MiB per-image limit", expected / (1 << 20), MAX_IMAGE_BYTES / (1 << 20)));
+    }
+    Ok(expected)
+}
+
+/// Check one new reservation against the aggregate budget, excluding the request itself.
+fn aggregate_budget(others: usize, expected: usize) -> Result<(), String> {
+    let total = others.saturating_add(expected);
+    if total > MAX_TOTAL_BYTES {
+        return Err(format!("screenshot budget exhausted: {total} bytes reserved of a {MAX_TOTAL_BYTES}-byte aggregate limit"));
+    }
+    Ok(())
+}
+
+/// Finalize a request at a new geometry: recheck per-image and aggregate limits (excluding its
+/// old reservation), then take the new reservation and restart settling.
+fn revalidate_reservation(r: &mut PendingCapture, others: usize, geometry: CaptureGeometry, epoch: u64) -> Result<(), String> {
+    let expected = image_budget(&geometry)?;
+    aggregate_budget(others, expected)?;
+    r.reserved_bytes = expected;
+    r.geometry = geometry;
+    r.epoch = epoch;
+    r.issued_epoch = None;
+    r.issued = false;
+    r.settle_passes = 0;
+    Ok(())
+}
+
+fn finish(r: &mut PendingCapture, result: Result<Arc<ColorImage>, String>) -> Finished {
+    if let Some(slot) = r.slot.take() {
+        slot.cancel();
+    }
+    Finished { token: r.token, path: r.path.take(), reply: r.reply.take(), result }
+}
+
+/// The returned image must be the issued viewport (within a pixel) or a uniform renderer fit
+/// bounded by `max_texture_side` (E2). An arbitrarily smaller same-aspect image is not accepted:
+/// it could be a stale or downscaled surface, not the frame that was asked for. A different
+/// aspect ratio is a resize/recreation and must not be labelled with the old geometry.
+fn check_image(image: &ColorImage, geometry: &CaptureGeometry) -> Result<(), String> {
+    let Some([w, h]) = geometry.expected_pixels() else {
+        return Err("the captured geometry has no valid pixel size".into());
+    };
+    let [iw, ih] = image.size;
+    if iw == 0 || ih == 0 {
+        return Err("the image has a zero side".into());
+    }
+    if iw > w.saturating_add(1) || ih > h.saturating_add(1) {
+        return Err(format!("the image is {iw}×{ih}, larger than the issued viewport {w}×{h}"));
+    }
+    let close = |a: usize, b: usize| a.abs_diff(b) <= 1;
+    if close(iw, w) && close(ih, h) {
+        return Ok(());
+    }
+    let side = geometry.max_texture_side.max(1);
+    let fit = (side as f64 / w.max(h) as f64).min(1.0);
+    let fw = (w as f64 * fit).round() as usize;
+    let fh = (h as f64 * fit).round() as usize;
+    if fw >= 1 && fh >= 1 && close(iw, fw) && close(ih, fh) {
+        return Ok(());
+    }
+    let expected_aspect = w as f32 / h as f32;
+    let actual_aspect = iw as f32 / ih as f32;
+    if !actual_aspect.is_finite() || (actual_aspect - expected_aspect).abs() > expected_aspect * 0.02 {
+        return Err(format!("the image is {iw}×{ih}, not the issued {w}×{h} aspect ratio"));
+    }
+    Err(format!("the image is {iw}×{ih}, neither the issued {w}×{h} viewport nor its {fw}×{fh} texture-side fit"))
+}
+
+/// Whether two optional document identities are the same document in the same activation.
+fn same_activation(a: Option<DocumentId>, b: Option<DocumentId>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same_activation(b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn timeout_error(token: u64) -> String {
+    format!("screenshot {token} timed out: no frame was presented within {} s", DEADLINE.as_secs())
+}
+
+fn document_changed_error(token: u64) -> String {
+    format!("screenshot {token} failed: the document changed while the capture was queued")
+}
+
+/// The settle delay for a style's animation time, in milliseconds (egui's open/close fades).
+pub fn settle_ms(animation_time: f32) -> f64 {
+    f64::from(animation_time) * 2000.0 + BASE_SETTLE_MS
+}
+
+/// A monotonic clock for capture lifecycles.
+pub fn now() -> Instant {
+    Instant::now()
+}
+
+/// The `Screenshot` command that carries `callback` to the renderer.
+pub fn send_command(ctx: &Context, callback: ScreenshotCallback) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(callback));
 }

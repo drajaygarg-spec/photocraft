@@ -126,7 +126,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     let o = &mut app.ui.tool_options.marker;
     lbl(ui, tl!("Marker:"));
     let shapes: Vec<(String, &str)> = SHAPES.iter().map(|(id, l)| (id.to_string(), *l)).collect();
-    crate::widgets::dropdown(ui, "marker-shape", &mut o.shape, &shapes, 100.0);
+    crate::widgets::dropdown(ui, "marker-shape", tl!("Marker:"), &mut o.shape, &shapes, 100.0);
     lbl(ui, tl!("Size:"));
     crate::widgets::value_field(ui, &mut o.size_pt, 2.0..=144.0, "pt", 58.0);
     lbl(ui, tl!("Color:"));

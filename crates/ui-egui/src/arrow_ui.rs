@@ -469,7 +469,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     lbl(ui, tl!("Line:"));
     let mut line = current.line();
     let lines: Vec<(&str, &str)> = LINES.iter().map(|n| (*n, *n)).chain((line == "Custom").then_some(("Custom", "Custom"))).collect();
-    if crate::widgets::dropdown(ui, "arrow-line", &mut line, &lines, 82.0) && line != "Custom" {
+    if crate::widgets::dropdown(ui, "arrow-line", tl!("Line:"), &mut line, &lines, 82.0) && line != "Custom" {
         next.style.preset(line);
         if line != "Dotted" {
             next.style.cap = LineCap::Round;
@@ -478,7 +478,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     lbl(ui, tl!("Heads:"));
     let mut ends = current.style.arrow_ends();
     let opts = [(ArrowEnds::End, "End"), (ArrowEnds::Start, "Start"), (ArrowEnds::Both, "Both"), (ArrowEnds::None, "None")];
-    if crate::widgets::dropdown(ui, "arrow-ends", &mut ends, &opts, 70.0) {
+    if crate::widgets::dropdown(ui, "arrow-ends", tl!("Heads:"), &mut ends, &opts, 70.0) {
         let head = next.head();
         next.style.arrow_end = Some(head);
         next.style.set_arrow_ends(ends);
@@ -492,7 +492,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
         if size == usize::MAX {
             sizes.push((usize::MAX, "Custom"));
         }
-        if crate::widgets::dropdown(ui, "arrow-size", &mut size, &sizes, 78.0)
+        if crate::widgets::dropdown(ui, "arrow-size", tl!("Size:"), &mut size, &sizes, 78.0)
             && let Some((_, w, l)) = SIZES.get(size)
         {
             next.set_head(Arrowhead { width: *w, length: *l, ..head });
@@ -502,7 +502,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
         if shape == usize::MAX {
             shapes.push((usize::MAX, "Custom"));
         }
-        if crate::widgets::dropdown(ui, "arrow-shape", &mut shape, &shapes, 82.0)
+        if crate::widgets::dropdown(ui, "arrow-shape", tl!("Shape"), &mut shape, &shapes, 82.0)
             && let Some((_, c)) = SHAPES.get(shape)
         {
             next.set_head(Arrowhead { concavity: *c, ..head });
