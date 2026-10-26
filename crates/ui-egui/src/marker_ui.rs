@@ -137,14 +137,31 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
         }
     }
     let color = o.color;
-    let paint = photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(color[0], color[1], color[2], color[3]));
-    if let Some(crate::shape_paint_ui::PaintChange::Color(c)) = crate::shape_paint_ui::swatch(ui, Some(&paint), color, tl!("Marker color")) {
+    if let Some(c) = color_swatch(app, ui, color, tl!("Marker color")) {
         app.ui.tool_options.marker.color = c;
     }
     crate::widgets::checkbox(ui, &mut app.ui.tool_options.marker.outline, tl!("Outline"));
     crate::widgets::vline(ui, 22.0);
     lbl(ui, tl!("Click to place a marker"));
     true
+}
+
+/// The shared shape paint swatch for a solid colour (Arrow, Marker and Cut Out options): only a
+/// Solid pick changes it; No Color and Gradient don't apply to these tools.
+pub(crate) fn color_swatch(app: &mut PhotocraftApp, ui: &mut egui::Ui, color: [f32; 4], tip: &str) -> Option<[f32; 4]> {
+    let paint = photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(color[0], color[1], color[2], color[3]));
+    let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
+    let mut gradients = crate::shape_gradient_ui::GradientChoices {
+        presets: &app.session.presets.gradients,
+        current: &app.session.presets.gradient,
+        recent: &mut app.ui.recent_gradients,
+        fg,
+        bg,
+    };
+    match crate::shape_paint_ui::swatch(ui, Some(&paint), color, tip, &mut gradients) {
+        Some(crate::shape_paint_ui::PaintChange::Color(c)) => Some(c),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

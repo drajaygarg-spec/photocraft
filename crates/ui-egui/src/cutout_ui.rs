@@ -170,8 +170,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
     let styled = o.edge != "straight";
     let color = o.edge_color;
     ui.add_enabled_ui(styled, |ui| {
-        let paint = photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(color[0], color[1], color[2], color[3]));
-        if let Some(crate::shape_paint_ui::PaintChange::Color(c)) = crate::shape_paint_ui::swatch(ui, Some(&paint), color, tl!("Edge color")) {
+        if let Some(c) = crate::marker_ui::color_swatch(app, ui, color, tl!("Edge color")) {
             app.ui.tool_options.cut_out.edge_color = c;
         }
     });

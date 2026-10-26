@@ -447,8 +447,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> bool {
     }
     crate::widgets::vline(ui, 22.0);
     lbl(ui, tl!("Color:"));
-    let paint = photocraft_doc::Fill::Solid(photocraft_doc::Color::rgba(current.color[0], current.color[1], current.color[2], current.color[3]));
-    if let Some(crate::shape_paint_ui::PaintChange::Color(c)) = crate::shape_paint_ui::swatch(ui, Some(&paint), current.color, tl!("Arrow color")) {
+    if let Some(c) = crate::marker_ui::color_swatch(app, ui, current.color, tl!("Arrow color")) {
         next.color = c;
         coalesce = Some("color");
     }
