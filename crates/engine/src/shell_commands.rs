@@ -7,6 +7,7 @@
 
 /// Shell commands: id, label, menu path, default shortcut.
 pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
+    ("layer.selectUnderCursor", "Select Layer Under Cursor", &[], None),
     ("ui.symmetryTransform", "Transform Symmetry", &[], None),
     // Right-click the options bar's tool icon (#2825); `tool.resetAll` asks first.
     ("tool.reset", "Reset Tool", &[], None),
@@ -18,6 +19,12 @@ pub const SHELL_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("window.panel.dock", "Dock Panel", &[], None),
     ("window.panel.activate", "Activate Panel", &[], None),
     ("window.panel.close", "Close Panel", &[], None),
+    ("window.panel.closeGroup", "Close Tab Group", &[], None),
+    ("window.panel.closeOthers", "Close Other Panels in Group", &[], None),
+    ("window.panel.minimize", "Minimize Panel", &[], None),
+    ("window.panel.iconic", "Collapse to Icons", &[], None),
+    ("window.panel.window", "Open Panel in Own Window", &[], None),
+    ("ui.dock", "Arrange Panels", &[], None),
     ("file.open", "Open…", &["File"], Some("Cmd+O")),
     ("file.screenshot.new", "New Screenshot", &["File"], Some("Cmd+Shift+9")),
     ("file.screenshot.library", "Screenshot Library…", &["File"], None),
